@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>MMK · THB Exchange Tracker</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0F2A3D" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #F7F5F0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  input[type=number]::-webkit-inner-spin-button { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+const C = {
+  ink: "#0F2A3D", inkSoft: "#1B3B52", gold: "#C9A227", goldSoft: "#E6C866",
+  paper: "#F7F5F0", card: "#FFFFFF", line: "#E4E0D6", text: "#20262E",
+  textMute: "#6B7280", green: "#1F7A4D", red: "#B23A2E",
+};
+
+const fmt = (n, d = 0) => (isNaN(n) ? 0 : n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+const todayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
+const monthKey = (ts) => new Date(ts).toISOString().slice(0, 7);
+
+function load(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : fallback;
+  } catch { return fallback; }
+}
+function save(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { console.error(e); }
+}
+
+// ---------- simple inline icon set (no external icon library needed) ----------
+const Icon = ({ path, size = 20, color = "currentColor" }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d={path} />
+  </svg>
+);
+const ICONS = {
+  convert: "M17 1l4 4-4 4M3 11V9a4 4 0 014-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 01-4 4H3",
+  plus: "M12 5v14M5 12h14",
+  history: "M3 3v5h5M3.05 13A9 9 0 106 5.3L3 8",
+  chart: "M18 20V10M12 20V4M6 20v-6",
+  trash: "M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z",
+  coin: "M12 2a10 10 0 100 20 10 10 0 000-20zM12 6v12M9 9h4.5a2 2 0 010 4H9",
+};
+
+function App() {
+  const [tab, setTab] = useState("convert");
+  const [marketRate, setMarketRateRaw] = useState(() => load("kb_settings", { marketRate: 130 }).marketRate);
+  const [transactions, setTransactions] = useState(() => load("kb_transactions", []));
+  const [rateHistory, setRateHistory] = useState(() => load("kb_rate_history", []));
+
+  const setMarketRate = (r) => setMarketRateRaw(r);
+
+  useEffect(() => save("kb_settings", { marketRate }), [marketRate]);
+  useEffect(() => save("kb_transactions", transactions), [transactions]);
+  useEffect(() => save("kb_rate_history", rateHistory), [rateHistory]);
+
+  useEffect(() => {
+    const day = todayKey(Date.now());
+    setRateHistory((prev) => [...prev.filter((p) => p.date !== day), { date: day, rate: marketRate, ts: Date.now() }]);
+  }, [marketRate]);
+
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("service-worker.js").catch(() => {});
+    }
+  }, []);
+
+  const addTransaction = (tx) => setTransactions((prev) => [tx, ...prev]);
+  const deleteTransaction = (id) => setTransactions((prev) => prev.filter((t) => t.id !== id));
+
+  return (
+    <div style={{ background: C.paper, minHeight: "100vh", color: C.text }}>
+      <div style={{ maxWidth: 460, margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+        <Header marketRate={marketRate} />
+        <div style={{ flex: 1, paddingBottom: 84 }}>
+          {tab === "convert" && <ConvertTab marketRate={marketRate} setMarketRate={setMarketRate} />}
+          {tab === "new" && <NewTransactionTab marketRate={marketRate} onSave={(tx) => { addTransaction(tx); setTab("history"); }} />}
+          {tab === "history" && <HistoryTab transactions={transactions} onDelete={deleteTransaction} />}
+          {tab === "reports" && <ReportsTab transactions={transactions} rateHistory={rateHistory} currentRate={marketRate} />}
+        </div>
+        <BottomNav tab={tab} setTab={setTab} />
+      </div>
+    </div>
+  );
+}
+
+function Header({ marketRate }) {
+  return (
+    <div style={{ background: C.ink, color: "#fff", padding: "18px 20px 16px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: 0.85, fontSize: 12, letterSpacing: 1, textTransform: "uppercase" }}>
+        <Icon path={ICONS.coin} size={14} color={C.gold} />
+        <span>MMK · THB Exchange</span>
+      </div>
+      <div style={{ fontSize: 13, marginTop: 6, color: "#B9C4CE" }}>
+        Today's rate: <span style={{ color: C.goldSoft, fontWeight: 600 }}>{fmt(marketRate, 2)}</span> MMK per 1 THB
+      </div>
+    </div>
+  );
+}
+
+function BottomNav({ tab, setTab }) {
+  const items = [
+    { id: "convert", label: "Convert", icon: ICONS.convert },
+    { id: "new", label: "New", icon: ICONS.plus },
+    { id: "history", label: "History", icon: ICONS.history },
+    { id: "reports", label: "Reports", icon: ICONS.chart },
+  ];
+  return (
+    <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 460, background: "#fff", borderTop: `1px solid ${C.line}`, display: "flex", padding: "6px 4px calc(6px + env(safe-area-inset-bottom))" }}>
+      {items.map(({ id, label, icon }) => {
+        const active = tab === id;
+        return (
+          <button key={id} onClick={() => setTab(id)} style={{ flex: 1, background: "none", border: "none", padding: "8px 0", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer" }}>
+            <Icon path={icon} size={20} color={active ? C.gold : C.textMute} />
+            <span style={{ fontSize: 11, fontWeight: active ? 700 : 500, color: active ? C.ink : C.textMute }}>{label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Card({ children, style }) {
+  return <div style={{ background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 16, ...style }}>{children}</div>;
+}
+function Label({ children }) {
+  return <div style={{ fontSize: 12, fontWeight: 600, color: C.textMute, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>{children}</div>;
+}
+const inputStyle = { width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${C.line}`, fontSize: 17, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", background: "#FCFBF8", color: C.text, boxSizing: "border-box" };
+
+function ToggleGroup({ options, value, onChange }) {
+  return (
+    <div style={{ display: "flex", background: "#EFECE3", borderRadius: 10, padding: 3 }}>
+      {options.map((opt) => (
+        <button key={opt.value} onClick={() => onChange(opt.value)} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", cursor: "pointer", background: value === opt.value ? C.ink : "transparent", color: value === opt.value ? "#fff" : C.textMute, fontWeight: 600, fontSize: 13 }}>
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RateBoard({ value }) {
+  const str = fmt(value, 2);
+  return (
+    <div style={{ display: "flex", justifyContent: "center", gap: 4, flexWrap: "wrap", margin: "18px 0" }}>
+      {str.split("").map((ch, i) => (
+        <div key={i} style={{ minWidth: (ch === "." || ch === ",") ? 10 : 30, height: 46, background: C.ink, color: C.goldSoft, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "ui-monospace, monospace", fontSize: 24, fontWeight: 700, boxShadow: "inset 0 -2px 0 rgba(0,0,0,0.35)" }}>
+          {ch}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------- lightweight SVG charts (no external chart library) ----------
+function BarChartSVG({ data, height = 160 }) {
+  const w = 320, h = height, pad = 22;
+  const max = Math.max(1, ...data.map((d) => Math.abs(d.value)));
+  const barW = (w - pad * 2) / data.length;
+  const zeroY = pad + (h - pad * 2) / 2;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
+      <line x1={pad} y1={zeroY} x2={w - pad} y2={zeroY} stroke={C.line} strokeWidth="1" />
+      {data.map((d, i) => {
+        const barH = (Math.abs(d.value) / max) * ((h - pad * 2) / 2 - 4);
+        const x = pad + i * barW + barW * 0.18;
+        const y = d.value >= 0 ? zeroY - barH : zeroY;
+        return <rect key={i} x={x} y={y} width={barW * 0.64} height={Math.max(barH, 1)} fill={d.value >= 0 ? C.green : C.red} rx="2" />;
+      })}
+    </svg>
+  );
+}
+
+function LineChartSVG({ data, height = 160 }) {
+  const w = 320, h = height, pad = 22;
+  const values = data.map((d) => d.value);
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = max - min || 1;
+  const stepX = (w - pad * 2) / (data.length - 1 || 1);
+  const points = data.map((d, i) => {
+    const x = pad + i * stepX;
+    const y = pad + (1 - (d.value - min) / range) * (h - pad * 2);
+    return [x, y];
+  });
+  const path = points.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(" ");
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
+      <path d={path} fill="none" stroke={C.gold} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// ---------------- Convert Tab ----------------
+function ConvertTab({ marketRate, setMarketRate }) {
+  const [dir, setDir] = useState("mmk_to_thb");
+  const [amount, setAmount] = useState("100000");
+  const [rateInput, setRateInput] = useState(String(marketRate));
+  const [exMmk, setExMmk] = useState("100000");
+  const [exThb, setExThb] = useState("775");
+
+  useEffect(() => setRateInput(String(marketRate)), [marketRate]);
+
+  const amt = parseFloat(amount) || 0;
+  const rate = parseFloat(rateInput) || 0;
+  const result = dir === "mmk_to_thb" ? (rate ? amt / rate : 0) : amt * rate;
+
+  const applyExample = () => {
+    const mmk = parseFloat(exMmk) || 0, thb = parseFloat(exThb) || 0;
+    if (thb > 0) setMarketRate(Math.round((mmk / thb) * 100) / 100);
+  };
+
+  return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <Card>
+        <Label>Current market rate (MMK per 1 THB)</Label>
+        <RateBoard value={marketRate} />
+        <input type="number" value={rateInput} onChange={(e) => setRateInput(e.target.value)} onBlur={() => rate > 0 && setMarketRate(rate)} style={{ ...inputStyle, textAlign: "center" }} />
+        <div style={{ fontSize: 12, color: C.textMute, marginTop: 8, textAlign: "center" }}>This is your reference rate — new transactions compare against it to work out profit.</div>
+      </Card>
+      <Card>
+        <Label>Set rate from an example</Label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="number" value={exMmk} onChange={(e) => setExMmk(e.target.value)} style={inputStyle} placeholder="MMK" />
+          <span style={{ color: C.textMute, fontSize: 13 }}>=</span>
+          <input type="number" value={exThb} onChange={(e) => setExThb(e.target.value)} style={inputStyle} placeholder="THB" />
+        </div>
+        <button onClick={applyExample} style={{ marginTop: 10, width: "100%", padding: "10px 0", background: C.gold, color: "#fff", border: "none", borderRadius: 10, fontWeight: 700, cursor: "pointer" }}>Use this rate</button>
+      </Card>
+      <Card>
+        <Label>Quick calculator</Label>
+        <ToggleGroup value={dir} onChange={setDir} options={[{ value: "mmk_to_thb", label: "MMK → THB" }, { value: "thb_to_mmk", label: "THB → MMK" }]} />
+        <div style={{ marginTop: 12 }}>
+          <Label>{dir === "mmk_to_thb" ? "Amount in MMK" : "Amount in THB"}</Label>
+          <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} style={inputStyle} />
+        </div>
+        <div style={{ marginTop: 14, padding: 14, background: C.paper, borderRadius: 10, textAlign: "center" }}>
+          <div style={{ fontSize: 12, color: C.textMute, marginBottom: 4 }}>Result</div>
+          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>{dir === "mmk_to_thb" ? `฿ ${fmt(result, 2)}` : `${fmt(result, 0)} MMK`}</div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------- New Transaction Tab ----------------
+function NewTransactionTab({ marketRate, onSave }) {
+  const [direction, setDirection] = useState("buy");
+  const [inputCurrency, setInputCurrency] = useState("THB");
+  const [amountInput, setAmountInput] = useState("");
+  const [rateApplied, setRateApplied] = useState(String(marketRate));
+  const [note, setNote] = useState("");
+
+  useEffect(() => setRateApplied(String(marketRate)), [marketRate]);
+
+  const rate = parseFloat(rateApplied) || 0;
+  const amt = parseFloat(amountInput) || 0;
+  const amountThb = inputCurrency === "THB" ? amt : (rate ? amt / rate : 0);
+  const amountMmk = inputCurrency === "MMK" ? amt : amt * rate;
+  const profit = direction === "buy" ? amountThb * (marketRate - rate) : amountThb * (rate - marketRate);
+  const canSave = amt > 0 && rate > 0;
+
+  const save = () => {
+    if (!canSave) return;
+    onSave({ id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), ts: Date.now(), direction, amountThb, amountMmk, rateApplied: rate, marketRate, profit, note: note.trim() });
+  };
+
+  return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <Card>
+        <Label>Transaction type</Label>
+        <ToggleGroup value={direction} onChange={setDirection} options={[{ value: "buy", label: "Buy THB (from customer)" }, { value: "sell", label: "Sell THB (to customer)" }]} />
+      </Card>
+      <Card>
+        <Label>Amount currency</Label>
+        <ToggleGroup value={inputCurrency} onChange={setInputCurrency} options={[{ value: "THB", label: "THB" }, { value: "MMK", label: "MMK" }]} />
+        <div style={{ marginTop: 12 }}><Label>Amount</Label><input type="number" value={amountInput} onChange={(e) => setAmountInput(e.target.value)} style={inputStyle} placeholder="0" /></div>
+        <div style={{ marginTop: 12 }}><Label>Rate you're applying (MMK per 1 THB)</Label><input type="number" value={rateApplied} onChange={(e) => setRateApplied(e.target.value)} style={inputStyle} /></div>
+        <div style={{ marginTop: 12 }}><Label>Note (optional)</Label><input type="text" value={note} onChange={(e) => setNote(e.target.value)} style={{ ...inputStyle, fontFamily: "inherit", fontSize: 15 }} placeholder="Customer name / reference" /></div>
+      </Card>
+      <Card style={{ background: C.ink, color: "#fff", border: "none" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 8, color: "#B9C4CE" }}><span>THB amount</span><span style={{ fontFamily: "ui-monospace, monospace" }}>฿ {fmt(amountThb, 2)}</span></div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 8, color: "#B9C4CE" }}><span>MMK amount</span><span style={{ fontFamily: "ui-monospace, monospace" }}>{fmt(amountMmk, 0)} K</span></div>
+        <div style={{ height: 1, background: "rgba(255,255,255,0.15)", margin: "10px 0" }} />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ color: "#B9C4CE" }}>Estimated profit</span>
+          <span style={{ fontSize: 22, fontWeight: 700, color: profit >= 0 ? C.goldSoft : "#F0A79E", fontFamily: "ui-monospace, monospace" }}>{profit >= 0 ? "+" : ""}{fmt(profit, 0)} MMK</span>
+        </div>
+      </Card>
+      <button onClick={save} disabled={!canSave} style={{ padding: "14px 0", borderRadius: 12, border: "none", fontWeight: 700, fontSize: 16, background: canSave ? C.gold : "#D8D3C4", color: "#fff", cursor: canSave ? "pointer" : "not-allowed" }}>Save transaction</button>
+    </div>
+  );
+}
+
+// ---------------- History Tab ----------------
+function HistoryTab({ transactions, onDelete }) {
+  const groups = useMemo(() => {
+    const g = {};
+    transactions.forEach((t) => { const k = todayKey(t.ts); g[k] = g[k] || []; g[k].push(t); });
+    return Object.entries(g).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  }, [transactions]);
+
+  if (transactions.length === 0) {
+    return (
+      <div style={{ padding: 40, textAlign: "center", color: C.textMute }}>
+        <Icon path={ICONS.history} size={28} color={C.textMute} />
+        <div style={{ fontWeight: 600, margin: "10px 0 4px" }}>No transactions yet</div>
+        <div style={{ fontSize: 13 }}>Log one from the New tab and it'll show up here.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 18 }}>
+      {groups.map(([date, list]) => {
+        const dayTotal = list.reduce((s, t) => s + t.profit, 0);
+        return (
+          <div key={date}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 2px" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.textMute }}>{date}</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: dayTotal >= 0 ? C.green : C.red }}>{dayTotal >= 0 ? "+" : ""}{fmt(dayTotal, 0)} MMK</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {list.map((t) => (
+                <Card key={t.id} style={{ padding: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: t.direction === "buy" ? C.ink : C.inkSoft }}>{t.direction === "buy" ? "Bought THB" : "Sold THB"}</div>
+                      <div style={{ fontSize: 12, color: C.textMute, marginTop: 2 }}>฿ {fmt(t.amountThb, 2)} @ {fmt(t.rateApplied, 2)} · {new Date(t.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+                      {t.note && <div style={{ fontSize: 12, color: C.textMute, marginTop: 2, fontStyle: "italic" }}>{t.note}</div>}
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontWeight: 700, fontFamily: "ui-monospace, monospace", color: t.profit >= 0 ? C.green : C.red, fontSize: 14 }}>{t.profit >= 0 ? "+" : ""}{fmt(t.profit, 0)}</div>
+                      <button onClick={() => onDelete(t.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, marginTop: 4 }}><Icon path={ICONS.trash} size={14} color={C.textMute} /></button>
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------- Reports Tab ----------------
+function ReportsTab({ transactions, rateHistory, currentRate }) {
+  const today = todayKey(Date.now());
+  const thisMonth = monthKey(Date.now());
+  const todayProfit = transactions.filter((t) => todayKey(t.ts) === today).reduce((s, t) => s + t.profit, 0);
+  const monthProfit = transactions.filter((t) => monthKey(t.ts) === thisMonth).reduce((s, t) => s + t.profit, 0);
+  const allProfit = transactions.reduce((s, t) => s + t.profit, 0);
+
+  const rateTrend = useMemo(() => {
+    const pointMap = {};
+    transactions.slice().sort((a, b) => a.ts - b.ts).forEach((t) => { pointMap[todayKey(t.ts)] = t.marketRate; });
+    (rateHistory || []).slice().sort((a, b) => a.ts - b.ts).forEach((r) => { pointMap[r.date] = r.rate; });
+    const knownDates = Object.keys(pointMap).sort();
+    const days = []; let lastKnown = null;
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      if (pointMap[key] !== undefined) lastKnown = pointMap[key];
+      else if (lastKnown === null) {
+        const before = knownDates.filter((dt) => dt <= key);
+        lastKnown = before.length ? pointMap[before[before.length - 1]] : currentRate;
+      }
+      days.push({ label: key.slice(5), value: Math.round((lastKnown ?? currentRate) * 100) / 100 });
+    }
+    return days;
+  }, [transactions, rateHistory, currentRate]);
+
+  const last14 = useMemo(() => {
+    const days = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      const total = transactions.filter((t) => todayKey(t.ts) === key).reduce((s, t) => s + t.profit, 0);
+      days.push({ label: key.slice(5), value: Math.round(total) });
+    }
+    return days;
+  }, [transactions]);
+
+  const monthly = useMemo(() => {
+    const g = {};
+    transactions.forEach((t) => { const k = monthKey(t.ts); g[k] = g[k] || { profit: 0, count: 0 }; g[k].profit += t.profit; g[k].count += 1; });
+    return Object.entries(g).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  }, [transactions]);
+
+  const StatCard = ({ label, value }) => (
+    <Card style={{ flex: 1, textAlign: "center" }}>
+      <div style={{ fontSize: 11, color: C.textMute, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 15, color: value >= 0 ? C.green : C.red }}>{value >= 0 ? "+" : ""}{fmt(value, 0)}</div>
+    </Card>
+  );
+
+  return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", gap: 10 }}>
+        <StatCard label="Today" value={todayProfit} />
+        <StatCard label="This month" value={monthProfit} />
+        <StatCard label="All time" value={allProfit} />
+      </div>
+      <Card>
+        <Label>Exchange rate — last 30 days (MMK per 1 THB)</Label>
+        <LineChartSVG data={rateTrend} />
+        <div style={{ fontSize: 12, color: C.textMute, marginTop: 6 }}>Built from your rate updates and the rate used on each transaction.</div>
+      </Card>
+      <Card>
+        <Label>Daily profit — last 14 days (MMK)</Label>
+        <BarChartSVG data={last14} />
+      </Card>
+      <Card>
+        <Label>Monthly summary</Label>
+        {monthly.length === 0 && <div style={{ fontSize: 13, color: C.textMute }}>No data yet.</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {monthly.map(([m, v]) => (
+            <div key={m} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
+              <div><div style={{ fontSize: 14, fontWeight: 600 }}>{m}</div><div style={{ fontSize: 12, color: C.textMute }}>{v.count} transaction{v.count !== 1 ? "s" : ""}</div></div>
+              <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, color: v.profit >= 0 ? C.green : C.red }}>{v.profit >= 0 ? "+" : ""}{fmt(v.profit, 0)} MMK</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
