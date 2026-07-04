@@ -375,6 +375,55 @@ function LineChartSVG({ data, height = 160 }) {
   );
 }
 
+function CandlestickChartSVG({ candles, height = 190, hoverIdx, onHover, color }) {
+  const w = 320, h = height, padX = 8, padY = 16;
+  const highs = candles.map((c) => c.high), lows = candles.map((c) => c.low);
+  const min = candles.length ? Math.min(...lows) : 0;
+  const max = candles.length ? Math.max(...highs) : 1;
+  const spread = max - min || 1;
+  const slot = candles.length ? (w - padX * 2) / candles.length : 0;
+  const bodyW = Math.max(2, slot * 0.58);
+  const y = (v) => padY + (1 - (v - min) / spread) * (h - padY * 2);
+  const upColor = color?.up || "#3DBE7A";
+  const downColor = color?.down || "#E0564A";
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
+      {[0.25, 0.5, 0.75].map((f) => (
+        <line key={f} x1={padX} x2={w - padX} y1={padY + f * (h - padY * 2)} y2={padY + f * (h - padY * 2)} stroke="#1F3646" strokeWidth="1" />
+      ))}
+      {candles.map((c, i) => {
+        const cx = padX + i * slot + slot / 2;
+        const up = c.close >= c.open;
+        const fill = up ? upColor : downColor;
+        const bodyTop = y(Math.max(c.open, c.close));
+        const bodyBottom = y(Math.min(c.open, c.close));
+        const isHover = hoverIdx === i;
+        return (
+          <g
+            key={c.date}
+            onMouseEnter={() => onHover && onHover(i)}
+            onTouchStart={() => onHover && onHover(i)}
+            opacity={hoverIdx === null || isHover ? 1 : 0.55}
+          >
+            <line x1={cx} x2={cx} y1={y(c.high)} y2={y(c.low)} stroke={fill} strokeWidth="1.4" />
+            <rect
+              x={cx - bodyW / 2}
+              y={Math.min(bodyTop, bodyBottom)}
+              width={bodyW}
+              height={Math.max(1.4, Math.abs(bodyBottom - bodyTop))}
+              fill={fill}
+              stroke={isHover ? "#fff" : "none"}
+              strokeWidth="1"
+              rx="1"
+            />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 // ---------------- Convert Tab ----------------
 function ConvertTab({ marketRate, setMarketRate }) {
   const [dir, setDir] = useState("mmk_to_thb");
@@ -571,28 +620,145 @@ const CHART_INSTRUMENTS = [
   { key: "usd_thb", label: "USD/THB", compute: (d) => d.thb },
   { key: "gold_thb", label: "Gold/THB (oz)", compute: (d) => (1 / d.xau) * d.thb },
 ];
-const CHART_RANGES = [7, 30, 90];
+
+// Free/no-key daily view (unchanged) vs real intraday/daily OHLC via Twelve Data (needs a free API key).
+const TIMEFRAMES = [
+  { key: "4h", label: "4H", kind: "td", interval: "4h", outputsize: 180 },
+  { key: "1d_td", label: "1D", kind: "td", interval: "1day", outputsize: 120 },
+  { key: "7", label: "7D", kind: "free", days: 7 },
+  { key: "30", label: "30D", kind: "free", days: 30 },
+  { key: "90", label: "90D", kind: "free", days: 90 },
+];
+
+// Which Twelve Data forex symbol(s) feed each instrument. Pairs with no direct listing (THB/MMK,
+// Gold priced in THB) are derived by combining two USD-quoted legs candle-by-candle.
+const TD_SYMBOL_MAP = {
+  usd_thb: { direct: "USD/THB" },
+  usd_mmk: { direct: "USD/MMK" },
+  thb_mmk: { legA: "USD/MMK", legB: "USD/THB", mode: "ratio" },   // value = mmk / thb
+  gold_thb: { legA: "XAU/USD", legB: "USD/THB", mode: "product" }, // value = xauUsd * usdThb
+};
+
+async function fetchTwelveDataSeries(symbol, interval, outputsize, apiKey) {
+  const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=${outputsize}&apikey=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if (json.status === "error" || !Array.isArray(json.values)) {
+    throw new Error(json.message || `Twelve Data error for ${symbol}`);
+  }
+  return json.values
+    .map((v) => ({ date: v.datetime, open: parseFloat(v.open), high: parseFloat(v.high), low: parseFloat(v.low), close: parseFloat(v.close) }))
+    .reverse(); // Twelve Data returns newest-first; we want ascending for charting
+}
+
+function combineTdLegs(a, b, mode) {
+  const map = new Map(b.map((r) => [r.date, r]));
+  const out = [];
+  for (const r of a) {
+    const o2 = map.get(r.date);
+    if (!o2) continue;
+    let vals;
+    if (mode === "ratio") vals = [r.open / o2.open, r.close / o2.close, r.high / o2.low, r.low / o2.high];
+    else vals = [r.open * o2.open, r.close * o2.close, r.high * o2.high, r.low * o2.low];
+    out.push({
+      date: r.date,
+      open: mode === "ratio" ? r.open / o2.open : r.open * o2.open,
+      close: mode === "ratio" ? r.close / o2.close : r.close * o2.close,
+      high: Math.max(...vals),
+      low: Math.min(...vals),
+    });
+  }
+  return out;
+}
+
+async function fetchTdCandles(instrumentKey, interval, outputsize, apiKey) {
+  const spec = TD_SYMBOL_MAP[instrumentKey];
+  if (spec.direct) return fetchTwelveDataSeries(spec.direct, interval, outputsize, apiKey);
+  const [a, b] = await Promise.all([
+    fetchTwelveDataSeries(spec.legA, interval, outputsize, apiKey),
+    fetchTwelveDataSeries(spec.legB, interval, outputsize, apiKey),
+  ]);
+  return combineTdLegs(a, b, spec.mode);
+}
 
 function PriceChartCard() {
   const [instrumentKey, setInstrumentKey] = useState("thb_mmk");
-  const [range, setRange] = useState(30);
+  const [timeframeKey, setTimeframeKey] = useState("30");
+  const [chartType, setChartType] = useState("candle"); // candle | line
   const [rows, setRows] = useState([]);
-  const [status, setStatus] = useState("loading");
+  const [tdCandles, setTdCandles] = useState([]);
+  const [status, setStatus] = useState("loading"); // loading | idle | error | need_key
   const [hoverIdx, setHoverIdx] = useState(null);
+  const [lastLiveAt, setLastLiveAt] = useState(null);
+  const [apiKey, setApiKey] = useState(() => load("kb_twelvedata_key", ""));
+  const [keyDraft, setKeyDraft] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
   const wrapRef = React.useRef(null);
 
   const instrument = CHART_INSTRUMENTS.find((i) => i.key === instrumentKey);
+  const tf = TIMEFRAMES.find((t) => t.key === timeframeKey);
+
+  useEffect(() => save("kb_twelvedata_key", apiKey), [apiKey]);
 
   useEffect(() => {
     let cancelled = false;
-    setStatus("loading");
-    fetchHistory(range)
-      .then((data) => { if (!cancelled) { setRows(data); setStatus(data.length >= 2 ? "idle" : "error"); } })
-      .catch(() => !cancelled && setStatus("error"));
+    setErrorMsg("");
+    if (tf.kind === "free") {
+      setStatus("loading");
+      fetchHistory(tf.days)
+        .then((data) => { if (!cancelled) { setRows(data); setStatus(data.length >= 2 ? "idle" : "error"); setLastLiveAt(Date.now()); } })
+        .catch((e) => { if (!cancelled) { setErrorMsg(String(e?.message || e)); setStatus("error"); } });
+    } else {
+      if (!apiKey) { setStatus("need_key"); return; }
+      setStatus("loading");
+      fetchTdCandles(instrumentKey, tf.interval, tf.outputsize, apiKey)
+        .then((data) => { if (!cancelled) { setTdCandles(data); setStatus(data.length >= 2 ? "idle" : "error"); setLastLiveAt(Date.now()); } })
+        .catch((e) => { if (!cancelled) { setErrorMsg(String(e?.message || e)); setStatus("error"); } });
+    }
     return () => { cancelled = true; };
-  }, [range]);
+  }, [timeframeKey, instrumentKey, apiKey]);
 
-  const series = rows.map((r) => ({ date: r.date, value: instrument.compute(r) }));
+  // "Live" polling. Free daily source publishes ~once/day, so we poll it every minute — cheap and
+  // catches a fresh close quickly. Twelve Data's free tier caps requests (800/day, 8/min), so
+  // intraday polling is spaced out further to stay comfortably inside that budget.
+  useEffect(() => {
+    if (tf.kind !== "free") return;
+    const todayStr = todayKey(Date.now());
+    const poll = () => {
+      fetchDaySnapshot(todayStr, true).then((snap) => {
+        if (!snap) return;
+        const cache = load("kb_history_cache", {});
+        const prevStr = JSON.stringify(cache[todayStr] || null);
+        if (JSON.stringify(snap) === prevStr) return;
+        cache[todayStr] = snap;
+        save("kb_history_cache", cache);
+        setRows((prev) => { const next = prev.filter((r) => r.date !== todayStr); next.push(snap); return next; });
+        setLastLiveAt(Date.now());
+      }).catch(() => {});
+    };
+    const id = setInterval(poll, 60000);
+    return () => clearInterval(id);
+  }, [tf.kind]);
+
+  useEffect(() => {
+    if (tf.kind !== "td" || !apiKey) return;
+    const id = setInterval(() => {
+      fetchTdCandles(instrumentKey, tf.interval, tf.outputsize, apiKey)
+        .then((data) => { setTdCandles(data); setLastLiveAt(Date.now()); })
+        .catch(() => {});
+    }, 180000); // every 3 min — keeps well under Twelve Data's free-tier rate limits
+    return () => clearInterval(id);
+  }, [tf.kind, tf.interval, tf.outputsize, instrumentKey, apiKey]);
+
+  // Free-tier daily candles are synthetic (open = prior close) since that source has no intraday
+  // ticks. Twelve Data candles (4H / 1D) are real OHLC pulled straight from the API.
+  const candles = tf.kind === "free"
+    ? rows.map((r) => ({ date: r.date, value: instrument.compute(r) })).map((s, i, arr) => {
+        const open = i === 0 ? s.value : arr[i - 1].value;
+        return { date: s.date, open, close: s.value, high: Math.max(open, s.value), low: Math.min(open, s.value) };
+      })
+    : tdCandles;
+  const series = candles.map((c) => ({ date: c.date, value: c.close }));
   const last = series[series.length - 1];
   const first = series[0];
   const changePct = first && last ? ((last.value - first.value) / first.value) * 100 : 0;
@@ -617,65 +783,121 @@ function PriceChartCard() {
   const areaPath = points.length ? `${linePath} L${points[points.length - 1][0]},${h - padY} L${points[0][0]},${h - padY} Z` : "";
   const hover = hoverIdx !== null ? series[hoverIdx] : null;
   const hoverPoint = hoverIdx !== null ? points[hoverIdx] : null;
+  const rangeLabel = tf.kind === "free" ? `${tf.days}D` : tf.label;
 
   return (
     <Card style={{ background: "#0B1A26", border: "none", color: "#fff" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
-          <div style={{ fontSize: 12, color: "#7C97A8", textTransform: "uppercase", letterSpacing: 0.4 }}>{instrument.label}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, color: "#7C97A8", textTransform: "uppercase", letterSpacing: 0.4 }}>{instrument.label}</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "#3DBE7A", letterSpacing: 0.5 }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#3DBE7A", boxShadow: "0 0 0 0 rgba(61,190,122,0.7)", animation: "kbPulse 1.6s infinite" }} />
+              LIVE
+            </span>
+          </div>
           <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 22, fontWeight: 700, marginTop: 2 }}>
             {hover ? fmt(hover.value, 2) : last ? fmt(last.value, 2) : "—"}
           </div>
-          <div style={{ fontSize: 12, fontWeight: 700, color: lineColor, marginTop: 2 }}>
-            {series.length > 1 ? `${up ? "▲" : "▼"} ${fmt(Math.abs(changePct), 2)}% over ${range}D` : "—"}
-          </div>
+          {hover && chartType === "candle" ? (
+            <div style={{ fontSize: 11, color: "#7C97A8", marginTop: 2, display: "flex", gap: 8, fontFamily: "ui-monospace, monospace" }}>
+              <span>O {fmt(candles[hoverIdx]?.open, 2)}</span>
+              <span>H {fmt(candles[hoverIdx]?.high, 2)}</span>
+              <span>L {fmt(candles[hoverIdx]?.low, 2)}</span>
+              <span>C {fmt(candles[hoverIdx]?.close, 2)}</span>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, fontWeight: 700, color: lineColor, marginTop: 2 }}>
+              {series.length > 1 ? `${up ? "▲" : "▼"} ${fmt(Math.abs(changePct), 2)}% (${rangeLabel})` : "—"}
+            </div>
+          )}
         </div>
-        <div style={{ display: "flex", gap: 4 }}>
-          {CHART_RANGES.map((r) => (
-            <button key={r} onClick={() => setRange(r)} style={{ padding: "5px 9px", borderRadius: 7, border: "none", background: range === r ? "#1F3646" : "transparent", color: range === r ? "#fff" : "#7C97A8", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-              {r}D
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div
-        ref={wrapRef}
-        style={{ position: "relative", touchAction: "pan-y" }}
-        onMouseMove={(e) => handleMove(e.clientX)}
-        onMouseLeave={() => setHoverIdx(null)}
-        onTouchMove={(e) => handleMove(e.touches[0].clientX)}
-        onTouchEnd={() => setHoverIdx(null)}
-      >
-        {status === "loading" && <div style={{ height: h, display: "flex", alignItems: "center", justifyContent: "center", color: "#7C97A8", fontSize: 13 }}>Loading chart…</div>}
-        {status === "error" && <div style={{ height: h, display: "flex", alignItems: "center", justifyContent: "center", color: "#E0564A", fontSize: 13 }}>Couldn't load history — check your connection.</div>}
-        {status === "idle" && (
-          <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
-            <defs>
-              <linearGradient id={`grad-${instrumentKey}`} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={lineColor} stopOpacity="0.35" />
-                <stop offset="100%" stopColor={lineColor} stopOpacity="0" />
-              </linearGradient>
-            </defs>
-            {[0.25, 0.5, 0.75].map((f) => (
-              <line key={f} x1={padX} x2={w - padX} y1={padY + f * (h - padY * 2)} y2={padY + f * (h - padY * 2)} stroke="#1F3646" strokeWidth="1" />
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {TIMEFRAMES.map((t) => (
+              <button key={t.key} onClick={() => setTimeframeKey(t.key)} style={{ padding: "5px 9px", borderRadius: 7, border: "none", background: timeframeKey === t.key ? "#1F3646" : "transparent", color: timeframeKey === t.key ? "#fff" : "#7C97A8", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                {t.label}
+              </button>
             ))}
-            <path d={areaPath} fill={`url(#grad-${instrumentKey})`} stroke="none" />
-            <path d={linePath} fill="none" stroke={lineColor} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-            {hoverPoint && (
-              <>
-                <line x1={hoverPoint[0]} x2={hoverPoint[0]} y1={padY} y2={h - padY} stroke="#7C97A8" strokeWidth="1" strokeDasharray="3,3" />
-                <circle cx={hoverPoint[0]} cy={hoverPoint[1]} r="4" fill={lineColor} stroke="#0B1A26" strokeWidth="1.5" />
-              </>
-            )}
-          </svg>
-        )}
-        {hover && (
-          <div style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.5)", borderRadius: 6, padding: "3px 8px", fontSize: 11, color: "#fff" }}>
-            {hover.date}
           </div>
-        )}
+          <div style={{ display: "flex", gap: 4 }}>
+            {[{ v: "candle", label: "Candles" }, { v: "line", label: "Line" }].map((o) => (
+              <button key={o.v} onClick={() => setChartType(o.v)} style={{ padding: "4px 8px", borderRadius: 6, border: "none", background: chartType === o.v ? "#1F3646" : "transparent", color: chartType === o.v ? "#fff" : "#5E7684", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
+      <style>{`@keyframes kbPulse { 0% { box-shadow: 0 0 0 0 rgba(61,190,122,0.55);} 70% { box-shadow: 0 0 0 5px rgba(61,190,122,0);} 100% { box-shadow: 0 0 0 0 rgba(61,190,122,0);} }`}</style>
+
+      {status === "need_key" ? (
+        <div style={{ padding: "16px 4px" }}>
+          <div style={{ fontSize: 13, color: "#B9C4CE", marginBottom: 10, lineHeight: 1.5 }}>
+            4H and 1D show real intraday candles from Twelve Data, which needs a free API key (no card required).
+            Get one at <span style={{ color: C.goldSoft }}>twelvedata.com</span>, then paste it below.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type="text" value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)}
+              placeholder="Twelve Data API key"
+              style={{ flex: 1, padding: "10px 12px", borderRadius: 8, border: "1px solid #1F3646", background: "#0F202D", color: "#fff", fontSize: 13 }}
+            />
+            <button onClick={() => keyDraft.trim() && setApiKey(keyDraft.trim())} style={{ padding: "0 16px", borderRadius: 8, border: "none", background: C.gold, color: "#fff", fontWeight: 700, cursor: "pointer" }}>Save</button>
+          </div>
+        </div>
+      ) : (
+        <div
+          ref={wrapRef}
+          style={{ position: "relative", touchAction: "pan-y" }}
+          onMouseMove={(e) => handleMove(e.clientX)}
+          onMouseLeave={() => setHoverIdx(null)}
+          onTouchMove={(e) => handleMove(e.touches[0].clientX)}
+          onTouchEnd={() => setHoverIdx(null)}
+        >
+          {status === "loading" && <div style={{ height: h, display: "flex", alignItems: "center", justifyContent: "center", color: "#7C97A8", fontSize: 13 }}>Loading chart…</div>}
+          {status === "error" && (
+            <div style={{ height: h, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#E0564A", fontSize: 13, textAlign: "center", padding: "0 20px", gap: 8 }}>
+              <div>Couldn't load data{tf.kind === "td" ? " from Twelve Data" : " — check your connection"}.</div>
+              {errorMsg && <div style={{ fontSize: 11, color: "#B9827C", fontFamily: "ui-monospace, monospace" }}>{errorMsg}</div>}
+              {tf.kind === "td" && (
+                <button onClick={() => setApiKey("")} style={{ marginTop: 4, padding: "6px 12px", borderRadius: 8, border: "1px solid #E0564A", background: "transparent", color: "#E0564A", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                  Re-enter API key
+                </button>
+              )}
+            </div>
+          )}
+          {status === "idle" && chartType === "candle" && (
+            <CandlestickChartSVG candles={candles} height={h} hoverIdx={hoverIdx} onHover={setHoverIdx} />
+          )}
+          {status === "idle" && chartType === "line" && (
+            <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
+              <defs>
+                <linearGradient id={`grad-${instrumentKey}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={lineColor} stopOpacity="0.35" />
+                  <stop offset="100%" stopColor={lineColor} stopOpacity="0" />
+                </linearGradient>
+              </defs>
+              {[0.25, 0.5, 0.75].map((f) => (
+                <line key={f} x1={padX} x2={w - padX} y1={padY + f * (h - padY * 2)} y2={padY + f * (h - padY * 2)} stroke="#1F3646" strokeWidth="1" />
+              ))}
+              <path d={areaPath} fill={`url(#grad-${instrumentKey})`} stroke="none" />
+              <path d={linePath} fill="none" stroke={lineColor} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+              {hoverPoint && (
+                <>
+                  <line x1={hoverPoint[0]} x2={hoverPoint[0]} y1={padY} y2={h - padY} stroke="#7C97A8" strokeWidth="1" strokeDasharray="3,3" />
+                  <circle cx={hoverPoint[0]} cy={hoverPoint[1]} r="4" fill={lineColor} stroke="#0B1A26" strokeWidth="1.5" />
+                </>
+              )}
+            </svg>
+          )}
+          {hover && (
+            <div style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.5)", borderRadius: 6, padding: "3px 8px", fontSize: 11, color: "#fff" }}>
+              {hover.date}
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
         {CHART_INSTRUMENTS.map((i) => (
@@ -689,7 +911,14 @@ function PriceChartCard() {
         ))}
       </div>
       <div style={{ fontSize: 11, color: "#5E7684", marginTop: 10 }}>
-        Daily closes from exchange-api (fawazahmed0) · not real-time / intraday.
+        {tf.kind === "td"
+          ? `Real OHLC from Twelve Data (free tier) · re-checks every 3 min.${instrumentKey === "thb_mmk" || instrumentKey === "gold_thb" ? " This pair isn't listed directly, so it's derived by combining the two USD legs candle-by-candle." : ""}`
+          : chartType === "candle"
+          ? "Daily candles from exchange-api (fawazahmed0): open = prior day's close, close = that day's close. Checks for a fresh close automatically every minute — the source itself updates roughly once a day."
+          : "Daily closes from exchange-api (fawazahmed0) · auto-refreshes every minute for the latest close."}
+        {apiKey && tf.kind === "free" && (
+          <span> · <span style={{ cursor: "pointer", textDecoration: "underline" }} onClick={() => setApiKey("")}>Forget Twelve Data key</span></span>
+        )}
       </div>
     </Card>
   );
