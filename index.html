@@ -623,12 +623,19 @@ const CHART_INSTRUMENTS = [
 
 // Free/no-key daily view (unchanged) vs real intraday/daily OHLC via Twelve Data (needs a free API key).
 const TIMEFRAMES = [
+  { key: "15m", label: "15m", kind: "td", interval: "15min", outputsize: 192 },
+  { key: "1h", label: "1H", kind: "td", interval: "1h", outputsize: 168 },
   { key: "4h", label: "4H", kind: "td", interval: "4h", outputsize: 180 },
   { key: "1d_td", label: "1D", kind: "td", interval: "1day", outputsize: 120 },
   { key: "7", label: "7D", kind: "free", days: 7 },
   { key: "30", label: "30D", kind: "free", days: 30 },
   { key: "90", label: "90D", kind: "free", days: 90 },
 ];
+
+// Zoom/pan tuning for the TradingView-style chart interactions
+const MIN_VISIBLE_CANDLES = 8;
+const WHEEL_ZOOM_IN = 0.87;
+const WHEEL_ZOOM_OUT = 1.15;
 
 // Which Twelve Data forex symbol(s) feed each instrument. Pairs with no direct listing (THB/MMK,
 // Gold priced in THB) are derived by combining two USD-quoted legs candle-by-candle.
@@ -693,12 +700,19 @@ function PriceChartCard() {
   const [apiKey, setApiKey] = useState(() => load("kb_twelvedata_key", ""));
   const [keyDraft, setKeyDraft] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  const [view, setView] = useState(null); // {s, e} visible candle-index window, or null = fully zoomed out
   const wrapRef = React.useRef(null);
+  const dragRef = React.useRef(null);
+  const pinchRef = React.useRef(null);
+  const lastTapRef = React.useRef(0);
 
   const instrument = CHART_INSTRUMENTS.find((i) => i.key === instrumentKey);
   const tf = TIMEFRAMES.find((t) => t.key === timeframeKey);
 
   useEffect(() => save("kb_twelvedata_key", apiKey), [apiKey]);
+
+  // Reset zoom whenever the underlying series changes (new timeframe/instrument = new data range)
+  useEffect(() => { setView(null); }, [timeframeKey, instrumentKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -751,13 +765,17 @@ function PriceChartCard() {
   }, [tf.kind, tf.interval, tf.outputsize, instrumentKey, apiKey]);
 
   // Free-tier daily candles are synthetic (open = prior close) since that source has no intraday
-  // ticks. Twelve Data candles (4H / 1D) are real OHLC pulled straight from the API.
-  const candles = tf.kind === "free"
+  // ticks. Twelve Data candles (15m / 1H / 4H / 1D) are real OHLC pulled straight from the API.
+  const allCandles = tf.kind === "free"
     ? rows.map((r) => ({ date: r.date, value: instrument.compute(r) })).map((s, i, arr) => {
         const open = i === 0 ? s.value : arr[i - 1].value;
         return { date: s.date, open, close: s.value, high: Math.max(open, s.value), low: Math.min(open, s.value) };
       })
     : tdCandles;
+  const totalCandles = allCandles.length;
+  const viewRange = view || { s: 0, e: totalCandles };
+  const candles = allCandles.slice(viewRange.s, viewRange.e); // the currently zoomed-in window
+  const isZoomed = !!view && (viewRange.s > 0 || viewRange.e < totalCandles);
   const series = candles.map((c) => ({ date: c.date, value: c.close }));
   const last = series[series.length - 1];
   const first = series[0];
@@ -770,6 +788,95 @@ function PriceChartCard() {
     const rect = wrapRef.current.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     setHoverIdx(Math.round(ratio * (series.length - 1)));
+  };
+
+  // ---- Zoom / pan (TradingView-style: wheel or pinch to zoom, drag to pan, double-tap/click to reset) ----
+  const zoomAt = (ratio, factor) => {
+    if (totalCandles < 2) return;
+    setView((prev) => {
+      const cur = prev || { s: 0, e: totalCandles };
+      const curLen = cur.e - cur.s;
+      const anchorIdx = cur.s + ratio * curLen;
+      let newLen = Math.max(MIN_VISIBLE_CANDLES, Math.min(totalCandles, curLen * factor));
+      let newS = anchorIdx - ratio * newLen;
+      let newE = newS + newLen;
+      if (newS < 0) { newE -= newS; newS = 0; }
+      if (newE > totalCandles) { newS -= (newE - totalCandles); newE = totalCandles; }
+      newS = Math.max(0, newS);
+      return { s: Math.round(newS), e: Math.round(newE) };
+    });
+  };
+  const panByPixels = (dxPixels, startView) => {
+    if (!wrapRef.current || totalCandles < 2) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const base = startView || view || { s: 0, e: totalCandles };
+    const len = base.e - base.s;
+    const idxDelta = -(dxPixels / rect.width) * len;
+    let newS = base.s + idxDelta;
+    let newE = base.e + idxDelta;
+    if (newS < 0) { newE -= newS; newS = 0; }
+    if (newE > totalCandles) { newS -= (newE - totalCandles); newE = totalCandles; }
+    setView({ s: Math.max(0, Math.round(newS)), e: Math.round(newE) });
+  };
+  const resetZoom = () => setView(null);
+
+  const handleWheel = (e) => {
+    if (totalCandles < 2) return;
+    e.preventDefault();
+    if (!wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    zoomAt(ratio, e.deltaY > 0 ? WHEEL_ZOOM_OUT : WHEEL_ZOOM_IN);
+  };
+  const onChartMouseDown = (e) => {
+    dragRef.current = { startX: e.clientX, startView: view || { s: 0, e: totalCandles } };
+  };
+  const onChartMouseMove = (e) => {
+    if (dragRef.current) panByPixels(e.clientX - dragRef.current.startX, dragRef.current.startView);
+    else handleMove(e.clientX);
+  };
+  const onChartMouseUp = () => { dragRef.current = null; };
+  const touchDist = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+  const onChartTouchStart = (e) => {
+    if (e.touches.length === 2 && wrapRef.current) {
+      const rect = wrapRef.current.getBoundingClientRect();
+      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      pinchRef.current = {
+        startDist: touchDist(e.touches),
+        startView: view || { s: 0, e: totalCandles },
+        ratio: Math.min(1, Math.max(0, (midX - rect.left) / rect.width)),
+      };
+      dragRef.current = null;
+    } else if (e.touches.length === 1) {
+      const now = Date.now();
+      if (now - lastTapRef.current < 300) resetZoom();
+      lastTapRef.current = now;
+      dragRef.current = { startX: e.touches[0].clientX, startView: view || { s: 0, e: totalCandles } };
+      handleMove(e.touches[0].clientX);
+    }
+  };
+  const onChartTouchMove = (e) => {
+    if (e.touches.length === 2 && pinchRef.current) {
+      e.preventDefault();
+      const newDist = touchDist(e.touches);
+      const scale = pinchRef.current.startDist / Math.max(1, newDist);
+      const { s, e: end } = pinchRef.current.startView;
+      const len = end - s;
+      const anchorIdx = s + pinchRef.current.ratio * len;
+      let newLen = Math.max(MIN_VISIBLE_CANDLES, Math.min(totalCandles, len * scale));
+      let newS = anchorIdx - pinchRef.current.ratio * newLen;
+      let newE = newS + newLen;
+      if (newS < 0) { newE -= newS; newS = 0; }
+      if (newE > totalCandles) { newS -= (newE - totalCandles); newE = totalCandles; }
+      setView({ s: Math.max(0, Math.round(newS)), e: Math.round(newE) });
+    } else if (e.touches.length === 1 && dragRef.current) {
+      panByPixels(e.touches[0].clientX - dragRef.current.startX, dragRef.current.startView);
+      handleMove(e.touches[0].clientX);
+    }
+  };
+  const onChartTouchEnd = (e) => {
+    if (e.touches.length < 2) pinchRef.current = null;
+    if (e.touches.length === 0) { dragRef.current = null; setHoverIdx(null); }
   };
 
   const w = 320, h = 190, padX = 8, padY = 16;
@@ -827,6 +934,13 @@ function PriceChartCard() {
               </button>
             ))}
           </div>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <button onClick={() => zoomAt(0.5, WHEEL_ZOOM_IN)} title="Zoom in" style={{ width: 22, height: 22, borderRadius: 6, border: "none", background: "#1F3646", color: "#B9C4CE", fontSize: 14, fontWeight: 700, cursor: "pointer", lineHeight: "22px", padding: 0 }}>+</button>
+            <button onClick={() => zoomAt(0.5, WHEEL_ZOOM_OUT)} title="Zoom out" style={{ width: 22, height: 22, borderRadius: 6, border: "none", background: "#1F3646", color: "#B9C4CE", fontSize: 14, fontWeight: 700, cursor: "pointer", lineHeight: "22px", padding: 0 }}>−</button>
+            {isZoomed && (
+              <button onClick={resetZoom} title="Reset zoom" style={{ padding: "0 8px", height: 22, borderRadius: 6, border: "none", background: "#1F3646", color: C.goldSoft, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>Reset</button>
+            )}
+          </div>
         </div>
       </div>
       <style>{`@keyframes kbPulse { 0% { box-shadow: 0 0 0 0 rgba(61,190,122,0.55);} 70% { box-shadow: 0 0 0 5px rgba(61,190,122,0);} 100% { box-shadow: 0 0 0 0 rgba(61,190,122,0);} }`}</style>
@@ -834,7 +948,7 @@ function PriceChartCard() {
       {status === "need_key" ? (
         <div style={{ padding: "16px 4px" }}>
           <div style={{ fontSize: 13, color: "#B9C4CE", marginBottom: 10, lineHeight: 1.5 }}>
-            4H and 1D show real intraday candles from Twelve Data, which needs a free API key (no card required).
+            15m, 1H, 4H and 1D show real intraday candles from Twelve Data, which needs a free API key (no card required).
             Get one at <span style={{ color: C.goldSoft }}>twelvedata.com</span>, then paste it below.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -849,11 +963,16 @@ function PriceChartCard() {
       ) : (
         <div
           ref={wrapRef}
-          style={{ position: "relative", touchAction: "pan-y" }}
-          onMouseMove={(e) => handleMove(e.clientX)}
-          onMouseLeave={() => setHoverIdx(null)}
-          onTouchMove={(e) => handleMove(e.touches[0].clientX)}
-          onTouchEnd={() => setHoverIdx(null)}
+          style={{ position: "relative", touchAction: "pan-y", cursor: dragRef.current ? "grabbing" : "grab", userSelect: "none" }}
+          onWheel={handleWheel}
+          onMouseDown={onChartMouseDown}
+          onMouseMove={onChartMouseMove}
+          onMouseUp={onChartMouseUp}
+          onMouseLeave={() => { dragRef.current = null; setHoverIdx(null); }}
+          onDoubleClick={resetZoom}
+          onTouchStart={onChartTouchStart}
+          onTouchMove={onChartTouchMove}
+          onTouchEnd={onChartTouchEnd}
         >
           {status === "loading" && <div style={{ height: h, display: "flex", alignItems: "center", justifyContent: "center", color: "#7C97A8", fontSize: 13 }}>Loading chart…</div>}
           {status === "error" && (
@@ -896,6 +1015,16 @@ function PriceChartCard() {
               {hover.date}
             </div>
           )}
+          {isZoomed && status === "idle" && (
+            <div style={{ position: "absolute", top: 4, left: 4, background: "rgba(0,0,0,0.5)", borderRadius: 6, padding: "3px 8px", fontSize: 10, color: C.goldSoft, fontWeight: 700 }}>
+              {candles.length} of {totalCandles} candles
+            </div>
+          )}
+        </div>
+      )}
+      {status === "idle" && (
+        <div style={{ fontSize: 10, color: "#4A5F6D", marginTop: 6, textAlign: "center" }}>
+          Scroll or pinch to zoom · drag to pan · double-tap/click to reset
         </div>
       )}
 
