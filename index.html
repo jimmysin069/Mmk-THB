@@ -92,6 +92,38 @@ async function driveDownload(token) {
   return text ? JSON.parse(text) : null;
 }
 
+// ---------- Market reference rates (free, no-key currency-api via jsDelivr CDN) ----------
+const MARKET_DATA_URLS = [
+  "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",
+  "https://latest.currency-api.pages.dev/v1/currencies/usd.json",
+];
+const OUNCE_IN_GRAMS = 31.1034768;
+
+async function fetchMarketData() {
+  let lastErr;
+  for (const url of MARKET_DATA_URLS) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("bad status " + res.status);
+      const json = await res.json();
+      const u = json.usd || {};
+      const usdThb = u.thb, usdMmk = u.mmk, xau = u.xau;
+      if (!usdThb || !usdMmk || !xau) throw new Error("missing fields in response");
+      const goldUsdOz = 1 / xau;
+      const goldThbOz = goldUsdOz * usdThb;
+      return {
+        date: json.date,
+        fetchedAt: Date.now(),
+        usdThb, usdMmk,
+        thbMmk: usdMmk / usdThb,
+        goldThbOz,
+        goldThbGram: goldThbOz / OUNCE_IN_GRAMS,
+      };
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("Market data fetch failed");
+}
+
 // ---------- simple inline icon set (no external icon library needed) ----------
 const Icon = ({ path, size = 20, color = "currentColor" }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -121,6 +153,7 @@ function App() {
   const [rateHistory, setRateHistory] = useState(() => load("kb_rate_history", []));
   const [banks, setBanks] = useState(() => load("kb_banks", ["KBZ Bank", "AYA Bank", "CB Bank", "Bangkok Bank", "Kasikorn Bank"]));
   const [customers, setCustomers] = useState(() => load("kb_customers", []));
+  const [tips, setTips] = useState(() => load("kb_tips", []));
   const [googleClientId, setGoogleClientId] = useState(() => load("kb_google_client_id", ""));
   const [accessToken, setAccessToken] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | error
@@ -132,6 +165,7 @@ function App() {
   useEffect(() => save("kb_rate_history", rateHistory), [rateHistory]);
   useEffect(() => save("kb_banks", banks), [banks]);
   useEffect(() => save("kb_customers", customers), [customers]);
+  useEffect(() => save("kb_tips", tips), [tips]);
   useEffect(() => save("kb_google_client_id", googleClientId), [googleClientId]);
 
   useEffect(() => {
@@ -150,12 +184,12 @@ function App() {
     if (!accessToken) return;
     const t = setTimeout(() => {
       setSyncStatus("syncing");
-      driveUpload(accessToken, { marketRate, transactions, rateHistory, banks, customers })
+      driveUpload(accessToken, { marketRate, transactions, rateHistory, banks, customers, tips })
         .then(() => setSyncStatus("synced"))
         .catch(() => setSyncStatus("error"));
     }, 1200);
     return () => clearTimeout(t);
-  }, [accessToken, marketRate, transactions, rateHistory, banks, customers]);
+  }, [accessToken, marketRate, transactions, rateHistory, banks, customers, tips]);
 
   const restoreFromDrive = async () => {
     if (!accessToken) return;
@@ -168,6 +202,7 @@ function App() {
         if (data.rateHistory) setRateHistory(data.rateHistory);
         if (data.banks) setBanks(data.banks);
         if (data.customers) setCustomers(data.customers);
+        if (data.tips) setTips(data.tips);
       }
       setSyncStatus("synced");
     } catch {
@@ -180,6 +215,8 @@ function App() {
   const addCustomer = (c) => setCustomers((prev) => [c, ...prev]);
   const updateCustomer = (id, patch) => setCustomers((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   const deleteCustomer = (id) => setCustomers((prev) => prev.filter((c) => c.id !== id));
+  const addTip = (t) => setTips((prev) => [t, ...prev]);
+  const deleteTip = (id) => setTips((prev) => prev.filter((t) => t.id !== id));
 
   return (
     <div style={{ background: C.paper, minHeight: "100vh", color: C.text }}>
@@ -192,13 +229,14 @@ function App() {
               marketRate={marketRate}
               customers={customers}
               onSave={(tx) => { addTransaction(tx); setTab("history"); }}
+              onSaveTip={(tip) => { addTip(tip); setTab("history"); }}
             />
           )}
-          {tab === "history" && <HistoryTab transactions={transactions} onDelete={deleteTransaction} />}
+          {tab === "history" && <HistoryTab transactions={transactions} tips={tips} onDelete={deleteTransaction} onDeleteTip={deleteTip} />}
           {tab === "customers" && (
             <CustomersTab customers={customers} banks={banks} onAdd={addCustomer} onUpdate={updateCustomer} onDelete={deleteCustomer} />
           )}
-          {tab === "reports" && <ReportsTab transactions={transactions} rateHistory={rateHistory} currentRate={marketRate} />}
+          {tab === "reports" && <ReportsTab transactions={transactions} tips={tips} rateHistory={rateHistory} currentRate={marketRate} />}
           {tab === "settings" && (
             <SettingsTab
               banks={banks} setBanks={setBanks}
@@ -358,6 +396,8 @@ function ConvertTab({ marketRate, setMarketRate }) {
 
   return (
     <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <MarketRatesCard setMarketRate={setMarketRate} />
+      <PriceChartCard />
       <Card>
         <Label>Current market rate (MMK per 1 THB)</Label>
         <RateBoard value={marketRate} />
@@ -389,8 +429,275 @@ function ConvertTab({ marketRate, setMarketRate }) {
   );
 }
 
+function MarketRatesCard({ setMarketRate }) {
+  const [data, setData] = useState(() => load("kb_market_data", null));
+  const [status, setStatus] = useState("idle"); // idle | loading | error
+  const [multiplier, setMultiplier] = useState(() => load("kb_parallel_multiplier", 2));
+
+  const refresh = () => {
+    setStatus("loading");
+    fetchMarketData()
+      .then((d) => { setData(d); save("kb_market_data", d); setStatus("idle"); })
+      .catch(() => setStatus("error"));
+  };
+
+  useEffect(() => { refresh(); }, []);
+  useEffect(() => save("kb_parallel_multiplier", multiplier), [multiplier]);
+
+  const Row = ({ label, value, sub, action }) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: `1px solid ${C.line}` }}>
+      <div>
+        <div style={{ fontSize: 13, color: C.textMute }}>{label}</div>
+        {sub && <div style={{ fontSize: 11, color: C.textMute, opacity: 0.8 }}>{sub}</div>}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 15 }}>{value}</span>
+        {action}
+      </div>
+    </div>
+  );
+
+  const UseBtn = ({ onClick }) => (
+    <button onClick={onClick} style={{ background: C.gold, color: "#fff", border: "none", borderRadius: 6, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Use</button>
+  );
+
+  const DualRow = ({ label, officialValue, sub, onUseOfficial, onUseParallel }) => (
+    <div style={{ padding: "10px 0", borderBottom: `1px solid ${C.line}` }}>
+      <div style={{ fontSize: 13, color: C.textMute, marginBottom: 6 }}>{label}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <span style={{ fontSize: 12, color: C.textMute }}>Official / interbank</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 15 }}>{officialValue}</span>
+          {onUseOfficial && <UseBtn onClick={onUseOfficial} />}
+        </div>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: C.gold, fontWeight: 600 }}>Parallel (≈{fmt(multiplier, multiplier % 1 ? 1 : 0)}×)</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 15, color: C.gold }}>{fmt(parseFloat(officialValue.replace(/,/g, "")) * multiplier, 2)}</span>
+          {onUseParallel && <UseBtn onClick={onUseParallel} />}
+        </div>
+      </div>
+      {sub && <div style={{ fontSize: 11, color: C.textMute, opacity: 0.8, marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <Label>Live market reference</Label>
+        <button onClick={refresh} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: C.gold, fontWeight: 700 }}>
+          {status === "loading" ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+      {!data && status !== "error" && <div style={{ fontSize: 13, color: C.textMute, padding: "8px 0" }}>Loading rates…</div>}
+      {!data && status === "error" && <div style={{ fontSize: 13, color: C.red, padding: "8px 0" }}>Couldn't load rates — check your connection and tap Refresh.</div>}
+      {data && (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: C.paper, borderRadius: 8, marginBottom: 4 }}>
+            <span style={{ fontSize: 12, color: C.textMute }}>Parallel-market multiplier</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <input
+                type="number" step="0.1" value={multiplier}
+                onChange={(e) => setMultiplier(parseFloat(e.target.value) || 1)}
+                style={{ width: 56, padding: "4px 6px", borderRadius: 6, border: `1px solid ${C.line}`, fontFamily: "ui-monospace, monospace", fontSize: 13, textAlign: "center" }}
+              />
+              <span style={{ fontSize: 12, color: C.textMute }}>×</span>
+            </div>
+          </div>
+
+          <DualRow
+            label="USD / MMK"
+            officialValue={fmt(data.usdMmk, 2)}
+            onUseParallel={null}
+          />
+          <DualRow
+            label="THB / MMK"
+            officialValue={fmt(data.thbMmk, 2)}
+            sub="Parallel figure is official × your multiplier — adjust it to match what you're actually seeing on the street."
+            onUseOfficial={() => setMarketRate(Math.round(data.thbMmk * 100) / 100)}
+            onUseParallel={() => setMarketRate(Math.round(data.thbMmk * multiplier * 100) / 100)}
+          />
+
+          <Row label="USD / THB" value={fmt(data.usdThb, 2)} />
+          <Row label="Gold / THB (per oz)" value={fmt(data.goldThbOz, 0)} />
+          <Row label="Gold / THB (per gram)" value={fmt(data.goldThbGram, 0)} />
+          <div style={{ fontSize: 11, color: C.textMute, marginTop: 8 }}>
+            Source: exchange-api (fawazahmed0), daily update · data date {data.date}
+            {status === "error" && " · refresh failed, showing last saved rates"}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+async function fetchDaySnapshot(dateStr, isLatest) {
+  const urls = isLatest
+    ? ["https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json", "https://latest.currency-api.pages.dev/v1/currencies/usd.json"]
+    : [`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${dateStr}/v1/currencies/usd.json`, `https://${dateStr}.currency-api.pages.dev/v1/currencies/usd.json`];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const json = await res.json();
+      const u = json.usd;
+      if (!u || !u.thb || !u.mmk || !u.xau) continue;
+      return { date: json.date || dateStr, thb: u.thb, mmk: u.mmk, xau: u.xau };
+    } catch {}
+  }
+  return null;
+}
+
+async function fetchHistory(days) {
+  const cache = load("kb_history_cache", {});
+  const dateList = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    dateList.push(d.toISOString().slice(0, 10));
+  }
+  const todayStr = todayKey(Date.now());
+  const missing = dateList.filter((d) => !cache[d] || d === todayStr);
+  const results = await Promise.all(missing.map((d) => fetchDaySnapshot(d, d === todayStr)));
+  missing.forEach((d, i) => { if (results[i]) cache[d] = results[i]; });
+  save("kb_history_cache", cache);
+  return dateList.map((d) => cache[d]).filter(Boolean);
+}
+
+// ---------------- Price chart (TradingView-style) ----------------
+const CHART_INSTRUMENTS = [
+  { key: "thb_mmk", label: "THB/MMK", compute: (d) => d.mmk / d.thb },
+  { key: "usd_mmk", label: "USD/MMK", compute: (d) => d.mmk },
+  { key: "usd_thb", label: "USD/THB", compute: (d) => d.thb },
+  { key: "gold_thb", label: "Gold/THB (oz)", compute: (d) => (1 / d.xau) * d.thb },
+];
+const CHART_RANGES = [7, 30, 90];
+
+function PriceChartCard() {
+  const [instrumentKey, setInstrumentKey] = useState("thb_mmk");
+  const [range, setRange] = useState(30);
+  const [rows, setRows] = useState([]);
+  const [status, setStatus] = useState("loading");
+  const [hoverIdx, setHoverIdx] = useState(null);
+  const wrapRef = React.useRef(null);
+
+  const instrument = CHART_INSTRUMENTS.find((i) => i.key === instrumentKey);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    fetchHistory(range)
+      .then((data) => { if (!cancelled) { setRows(data); setStatus(data.length >= 2 ? "idle" : "error"); } })
+      .catch(() => !cancelled && setStatus("error"));
+    return () => { cancelled = true; };
+  }, [range]);
+
+  const series = rows.map((r) => ({ date: r.date, value: instrument.compute(r) }));
+  const last = series[series.length - 1];
+  const first = series[0];
+  const changePct = first && last ? ((last.value - first.value) / first.value) * 100 : 0;
+  const up = changePct >= 0;
+  const lineColor = up ? "#3DBE7A" : "#E0564A";
+
+  const handleMove = (clientX) => {
+    if (!wrapRef.current || series.length === 0) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    setHoverIdx(Math.round(ratio * (series.length - 1)));
+  };
+
+  const w = 320, h = 190, padX = 8, padY = 16;
+  const values = series.map((s) => s.value);
+  const min = values.length ? Math.min(...values) : 0;
+  const max = values.length ? Math.max(...values) : 1;
+  const spread = max - min || 1;
+  const stepX = series.length > 1 ? (w - padX * 2) / (series.length - 1) : 0;
+  const points = series.map((s, i) => [padX + i * stepX, padY + (1 - (s.value - min) / spread) * (h - padY * 2)]);
+  const linePath = points.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(" ");
+  const areaPath = points.length ? `${linePath} L${points[points.length - 1][0]},${h - padY} L${points[0][0]},${h - padY} Z` : "";
+  const hover = hoverIdx !== null ? series[hoverIdx] : null;
+  const hoverPoint = hoverIdx !== null ? points[hoverIdx] : null;
+
+  return (
+    <Card style={{ background: "#0B1A26", border: "none", color: "#fff" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 12, color: "#7C97A8", textTransform: "uppercase", letterSpacing: 0.4 }}>{instrument.label}</div>
+          <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 22, fontWeight: 700, marginTop: 2 }}>
+            {hover ? fmt(hover.value, 2) : last ? fmt(last.value, 2) : "—"}
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: lineColor, marginTop: 2 }}>
+            {series.length > 1 ? `${up ? "▲" : "▼"} ${fmt(Math.abs(changePct), 2)}% over ${range}D` : "—"}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {CHART_RANGES.map((r) => (
+            <button key={r} onClick={() => setRange(r)} style={{ padding: "5px 9px", borderRadius: 7, border: "none", background: range === r ? "#1F3646" : "transparent", color: range === r ? "#fff" : "#7C97A8", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              {r}D
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div
+        ref={wrapRef}
+        style={{ position: "relative", touchAction: "pan-y" }}
+        onMouseMove={(e) => handleMove(e.clientX)}
+        onMouseLeave={() => setHoverIdx(null)}
+        onTouchMove={(e) => handleMove(e.touches[0].clientX)}
+        onTouchEnd={() => setHoverIdx(null)}
+      >
+        {status === "loading" && <div style={{ height: h, display: "flex", alignItems: "center", justifyContent: "center", color: "#7C97A8", fontSize: 13 }}>Loading chart…</div>}
+        {status === "error" && <div style={{ height: h, display: "flex", alignItems: "center", justifyContent: "center", color: "#E0564A", fontSize: 13 }}>Couldn't load history — check your connection.</div>}
+        {status === "idle" && (
+          <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
+            <defs>
+              <linearGradient id={`grad-${instrumentKey}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={lineColor} stopOpacity="0.35" />
+                <stop offset="100%" stopColor={lineColor} stopOpacity="0" />
+              </linearGradient>
+            </defs>
+            {[0.25, 0.5, 0.75].map((f) => (
+              <line key={f} x1={padX} x2={w - padX} y1={padY + f * (h - padY * 2)} y2={padY + f * (h - padY * 2)} stroke="#1F3646" strokeWidth="1" />
+            ))}
+            <path d={areaPath} fill={`url(#grad-${instrumentKey})`} stroke="none" />
+            <path d={linePath} fill="none" stroke={lineColor} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+            {hoverPoint && (
+              <>
+                <line x1={hoverPoint[0]} x2={hoverPoint[0]} y1={padY} y2={h - padY} stroke="#7C97A8" strokeWidth="1" strokeDasharray="3,3" />
+                <circle cx={hoverPoint[0]} cy={hoverPoint[1]} r="4" fill={lineColor} stroke="#0B1A26" strokeWidth="1.5" />
+              </>
+            )}
+          </svg>
+        )}
+        {hover && (
+          <div style={{ position: "absolute", top: 4, right: 4, background: "rgba(0,0,0,0.5)", borderRadius: 6, padding: "3px 8px", fontSize: 11, color: "#fff" }}>
+            {hover.date}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
+        {CHART_INSTRUMENTS.map((i) => (
+          <button
+            key={i.key}
+            onClick={() => setInstrumentKey(i.key)}
+            style={{ padding: "6px 10px", borderRadius: 8, border: `1px solid ${instrumentKey === i.key ? C.gold : "#1F3646"}`, background: instrumentKey === i.key ? "rgba(201,162,39,0.15)" : "transparent", color: instrumentKey === i.key ? C.goldSoft : "#7C97A8", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+          >
+            {i.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: "#5E7684", marginTop: 10 }}>
+        Daily closes from exchange-api (fawazahmed0) · not real-time / intraday.
+      </div>
+    </Card>
+  );
+}
+
 // ---------------- New Transaction Tab ----------------
-function NewTransactionTab({ marketRate, customers, onSave }) {
+function NewTransactionTab({ marketRate, customers, onSave, onSaveTip }) {
+  const [entryType, setEntryType] = useState("exchange"); // exchange | tip
   const [direction, setDirection] = useState("buy");
   const [inputCurrency, setInputCurrency] = useState("THB");
   const [amountInput, setAmountInput] = useState("");
@@ -399,6 +706,11 @@ function NewTransactionTab({ marketRate, customers, onSave }) {
   const [customerId, setCustomerId] = useState("");
   const [checkAmount, setCheckAmount] = useState(false);
   const [checkReceipt, setCheckReceipt] = useState(false);
+
+  const [tipCurrency, setTipCurrency] = useState("THB");
+  const [tipAmount, setTipAmount] = useState("");
+  const [tipNote, setTipNote] = useState("");
+  const [tipChecked, setTipChecked] = useState(false);
 
   useEffect(() => setRateApplied(String(marketRate)), [marketRate]);
 
@@ -420,8 +732,55 @@ function NewTransactionTab({ marketRate, customers, onSave }) {
     setAmountInput(""); setNote(""); setCheckAmount(false); setCheckReceipt(false);
   };
 
+  const tipAmt = parseFloat(tipAmount) || 0;
+  const tipThb = tipCurrency === "THB" ? tipAmt : (marketRate ? tipAmt / marketRate : 0);
+  const tipMmk = tipCurrency === "MMK" ? tipAmt : tipAmt * marketRate;
+  const canSaveTip = tipAmt > 0 && tipChecked;
+
+  const saveTip = () => {
+    if (!canSaveTip) return;
+    onSaveTip({
+      id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), ts: Date.now(),
+      currency: tipCurrency, amountThb: tipThb, amountMmk: tipMmk, note: tipNote.trim(),
+    });
+    setTipAmount(""); setTipNote(""); setTipChecked(false);
+  };
+
   return (
     <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <Card>
+        <Label>Entry type</Label>
+        <ToggleGroup value={entryType} onChange={setEntryType} options={[{ value: "exchange", label: "Exchange" }, { value: "tip", label: "Tip income" }]} />
+      </Card>
+
+      {entryType === "tip" ? (
+        <>
+          <Card>
+            <Label>Tip currency</Label>
+            <ToggleGroup value={tipCurrency} onChange={setTipCurrency} options={[{ value: "THB", label: "THB" }, { value: "MMK", label: "MMK" }]} />
+            <div style={{ marginTop: 12 }}><Label>Amount</Label><input type="number" value={tipAmount} onChange={(e) => setTipAmount(e.target.value)} style={inputStyle} placeholder="0" /></div>
+            <div style={{ marginTop: 12 }}><Label>Note (optional)</Label><input type="text" value={tipNote} onChange={(e) => setTipNote(e.target.value)} style={{ ...inputStyle, fontFamily: "inherit", fontSize: 15 }} placeholder="Shift / date reference" /></div>
+          </Card>
+          <Card style={{ background: C.ink, color: "#fff", border: "none" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14 }}>
+              <span style={{ color: "#B9C4CE" }}>≈ Value</span>
+              <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, color: C.goldSoft }}>
+                {tipCurrency === "THB" ? `${fmt(tipMmk, 0)} MMK` : `฿ ${fmt(tipThb, 2)}`}
+              </span>
+            </div>
+          </Card>
+          <Card>
+            <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 2px", cursor: "pointer" }}>
+              <Checkbox checked={tipChecked} onChange={setTipChecked} />
+              <span style={{ fontSize: 14 }}>Check amount — counted and correct</span>
+            </label>
+          </Card>
+          <button onClick={saveTip} disabled={!canSaveTip} style={{ padding: "14px 0", borderRadius: 12, border: "none", fontWeight: 700, fontSize: 16, background: canSaveTip ? C.gold : "#D8D3C4", color: "#fff", cursor: canSaveTip ? "pointer" : "not-allowed" }}>
+            {tipChecked ? "Save tip" : "Tick the check to save"}
+          </button>
+        </>
+      ) : (
+      <>
       <Card>
         <Label>Transaction type</Label>
         <ToggleGroup value={direction} onChange={setDirection} options={[{ value: "buy", label: "Buy THB (from customer)" }, { value: "sell", label: "Sell THB (to customer)" }]} />
@@ -463,6 +822,8 @@ function NewTransactionTab({ marketRate, customers, onSave }) {
       <button onClick={save} disabled={!canSave} style={{ padding: "14px 0", borderRadius: 12, border: "none", fontWeight: 700, fontSize: 16, background: canSave ? C.gold : "#D8D3C4", color: "#fff", cursor: canSave ? "pointer" : "not-allowed" }}>
         {checkAmount && checkReceipt ? "Save transaction" : "Tick both checks to save"}
       </button>
+      </>
+      )}
     </div>
   );
 }
@@ -479,14 +840,16 @@ function Checkbox({ checked, onChange }) {
 }
 
 // ---------------- History Tab ----------------
-function HistoryTab({ transactions, onDelete }) {
+function HistoryTab({ transactions, tips, onDelete, onDeleteTip }) {
   const groups = useMemo(() => {
     const g = {};
-    transactions.forEach((t) => { const k = todayKey(t.ts); g[k] = g[k] || []; g[k].push(t); });
+    transactions.forEach((t) => { const k = todayKey(t.ts); g[k] = g[k] || []; g[k].push({ ...t, kind: "exchange" }); });
+    (tips || []).forEach((t) => { const k = todayKey(t.ts); g[k] = g[k] || []; g[k].push({ ...t, kind: "tip" }); });
+    Object.values(g).forEach((list) => list.sort((a, b) => b.ts - a.ts));
     return Object.entries(g).sort((a, b) => (a[0] < b[0] ? 1 : -1));
-  }, [transactions]);
+  }, [transactions, tips]);
 
-  if (transactions.length === 0) {
+  if (transactions.length === 0 && (!tips || tips.length === 0)) {
     return (
       <div style={{ padding: 40, textAlign: "center", color: C.textMute }}>
         <Icon path={ICONS.history} size={28} color={C.textMute} />
@@ -499,7 +862,7 @@ function HistoryTab({ transactions, onDelete }) {
   return (
     <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 18 }}>
       {groups.map(([date, list]) => {
-        const dayTotal = list.reduce((s, t) => s + t.profit, 0);
+        const dayTotal = list.reduce((s, t) => s + (t.kind === "tip" ? t.amountMmk : t.profit), 0);
         return (
           <div key={date}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 2px" }}>
@@ -507,7 +870,23 @@ function HistoryTab({ transactions, onDelete }) {
               <span style={{ fontSize: 13, fontWeight: 700, color: dayTotal >= 0 ? C.green : C.red }}>{dayTotal >= 0 ? "+" : ""}{fmt(dayTotal, 0)} MMK</span>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {list.map((t) => (
+              {list.map((t) => t.kind === "tip" ? (
+                <Card key={t.id} style={{ padding: 12, borderLeft: `3px solid ${C.gold}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.gold }}>Tip income</div>
+                      <div style={{ fontSize: 12, color: C.textMute, marginTop: 2 }}>
+                        {t.currency === "THB" ? `฿ ${fmt(t.amountThb, 2)}` : `${fmt(t.amountMmk, 0)} MMK`} · {new Date(t.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      </div>
+                      {t.note && <div style={{ fontSize: 12, color: C.textMute, marginTop: 2, fontStyle: "italic" }}>{t.note}</div>}
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontWeight: 700, fontFamily: "ui-monospace, monospace", color: C.green, fontSize: 14 }}>+{fmt(t.amountMmk, 0)}</div>
+                      <button onClick={() => onDeleteTip(t.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, marginTop: 4 }}><Icon path={ICONS.trash} size={14} color={C.textMute} /></button>
+                    </div>
+                  </div>
+                </Card>
+              ) : (
                 <Card key={t.id} style={{ padding: 12 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                     <div>
@@ -532,12 +911,19 @@ function HistoryTab({ transactions, onDelete }) {
 }
 
 // ---------------- Reports Tab ----------------
-function ReportsTab({ transactions, rateHistory, currentRate }) {
+function ReportsTab({ transactions, tips, rateHistory, currentRate }) {
   const today = todayKey(Date.now());
   const thisMonth = monthKey(Date.now());
-  const todayProfit = transactions.filter((t) => todayKey(t.ts) === today).reduce((s, t) => s + t.profit, 0);
-  const monthProfit = transactions.filter((t) => monthKey(t.ts) === thisMonth).reduce((s, t) => s + t.profit, 0);
+  const allTips = tips || [];
+  const profitToday = transactions.filter((t) => todayKey(t.ts) === today).reduce((s, t) => s + t.profit, 0);
+  const tipsToday = allTips.filter((t) => todayKey(t.ts) === today).reduce((s, t) => s + t.amountMmk, 0);
+  const profitMonth = transactions.filter((t) => monthKey(t.ts) === thisMonth).reduce((s, t) => s + t.profit, 0);
+  const tipsMonth = allTips.filter((t) => monthKey(t.ts) === thisMonth).reduce((s, t) => s + t.amountMmk, 0);
   const allProfit = transactions.reduce((s, t) => s + t.profit, 0);
+  const allTipsTotal = allTips.reduce((s, t) => s + t.amountMmk, 0);
+  const todayProfit = profitToday + tipsToday;
+  const monthProfit = profitMonth + tipsMonth;
+  const grandTotal = allProfit + allTipsTotal;
 
   const rateTrend = useMemo(() => {
     const pointMap = {};
@@ -563,17 +949,19 @@ function ReportsTab({ transactions, rateHistory, currentRate }) {
     for (let i = 13; i >= 0; i--) {
       const d = new Date(); d.setDate(d.getDate() - i);
       const key = d.toISOString().slice(0, 10);
-      const total = transactions.filter((t) => todayKey(t.ts) === key).reduce((s, t) => s + t.profit, 0);
-      days.push({ label: key.slice(5), value: Math.round(total) });
+      const profitTotal = transactions.filter((t) => todayKey(t.ts) === key).reduce((s, t) => s + t.profit, 0);
+      const tipTotal = allTips.filter((t) => todayKey(t.ts) === key).reduce((s, t) => s + t.amountMmk, 0);
+      days.push({ label: key.slice(5), value: Math.round(profitTotal + tipTotal) });
     }
     return days;
-  }, [transactions]);
+  }, [transactions, allTips]);
 
   const monthly = useMemo(() => {
     const g = {};
-    transactions.forEach((t) => { const k = monthKey(t.ts); g[k] = g[k] || { profit: 0, count: 0 }; g[k].profit += t.profit; g[k].count += 1; });
+    transactions.forEach((t) => { const k = monthKey(t.ts); g[k] = g[k] || { profit: 0, tips: 0, count: 0 }; g[k].profit += t.profit; g[k].count += 1; });
+    allTips.forEach((t) => { const k = monthKey(t.ts); g[k] = g[k] || { profit: 0, tips: 0, count: 0 }; g[k].tips += t.amountMmk; });
     return Object.entries(g).sort((a, b) => (a[0] < b[0] ? 1 : -1));
-  }, [transactions]);
+  }, [transactions, allTips]);
 
   const StatCard = ({ label, value }) => (
     <Card style={{ flex: 1, textAlign: "center" }}>
@@ -587,27 +975,45 @@ function ReportsTab({ transactions, rateHistory, currentRate }) {
       <div style={{ display: "flex", gap: 10 }}>
         <StatCard label="Today" value={todayProfit} />
         <StatCard label="This month" value={monthProfit} />
-        <StatCard label="All time" value={allProfit} />
+        <StatCard label="All time" value={grandTotal} />
       </div>
+      <Card>
+        <Label>Income split</Label>
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
+          <span style={{ fontSize: 13, color: C.textMute }}>Exchange profit (all time)</span>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700 }}>{fmt(allProfit, 0)} MMK</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
+          <span style={{ fontSize: 13, color: C.textMute }}>Tips (all time)</span>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700 }}>{fmt(allTipsTotal, 0)} MMK</span>
+        </div>
+      </Card>
       <Card>
         <Label>Exchange rate — last 30 days (MMK per 1 THB)</Label>
         <LineChartSVG data={rateTrend} />
         <div style={{ fontSize: 12, color: C.textMute, marginTop: 6 }}>Built from your rate updates and the rate used on each transaction.</div>
       </Card>
       <Card>
-        <Label>Daily profit — last 14 days (MMK)</Label>
+        <Label>Daily total income — last 14 days (MMK)</Label>
         <BarChartSVG data={last14} />
+        <div style={{ fontSize: 12, color: C.textMute, marginTop: 6 }}>Exchange profit + tips combined.</div>
       </Card>
       <Card>
         <Label>Monthly summary</Label>
         {monthly.length === 0 && <div style={{ fontSize: 13, color: C.textMute }}>No data yet.</div>}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {monthly.map(([m, v]) => (
-            <div key={m} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
-              <div><div style={{ fontSize: 14, fontWeight: 600 }}>{m}</div><div style={{ fontSize: 12, color: C.textMute }}>{v.count} transaction{v.count !== 1 ? "s" : ""}</div></div>
-              <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, color: v.profit >= 0 ? C.green : C.red }}>{v.profit >= 0 ? "+" : ""}{fmt(v.profit, 0)} MMK</div>
-            </div>
-          ))}
+          {monthly.map(([m, v]) => {
+            const total = v.profit + v.tips;
+            return (
+              <div key={m} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{m}</div>
+                  <div style={{ fontSize: 12, color: C.textMute }}>{v.count} transaction{v.count !== 1 ? "s" : ""}{v.tips ? ` · ${fmt(v.tips, 0)} MMK tips` : ""}</div>
+                </div>
+                <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, color: total >= 0 ? C.green : C.red }}>{total >= 0 ? "+" : ""}{fmt(total, 0)} MMK</div>
+              </div>
+            );
+          })}
         </div>
       </Card>
     </div>
