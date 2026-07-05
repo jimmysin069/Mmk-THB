@@ -148,7 +148,9 @@ const ICONS = {
 
 function App() {
   const [tab, setTab] = useState("convert");
-  const [marketRate, setMarketRateRaw] = useState(() => load("kb_settings", { marketRate: 130 }).marketRate);
+  const [marketRate, setMarketRateRaw] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5 }).marketRate);
+  const [buySpread, setBuySpread] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5 }).buySpread ?? 0);
+  const [sellSpread, setSellSpread] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5 }).sellSpread ?? 5);
   const [transactions, setTransactions] = useState(() => load("kb_transactions", []));
   const [rateHistory, setRateHistory] = useState(() => load("kb_rate_history", []));
   const [banks, setBanks] = useState(() => load("kb_banks", ["KBZ Bank", "AYA Bank", "CB Bank", "Bangkok Bank", "Kasikorn Bank"]));
@@ -159,8 +161,10 @@ function App() {
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | synced | error
 
   const setMarketRate = (r) => setMarketRateRaw(r);
+  const buyRate = marketRate + buySpread;   // rate you pay a customer when buying THB from them
+  const sellRate = marketRate + sellSpread; // rate you charge a customer when selling THB to them
 
-  useEffect(() => save("kb_settings", { marketRate }), [marketRate]);
+  useEffect(() => save("kb_settings", { marketRate, buySpread, sellSpread }), [marketRate, buySpread, sellSpread]);
   useEffect(() => save("kb_transactions", transactions), [transactions]);
   useEffect(() => save("kb_rate_history", rateHistory), [rateHistory]);
   useEffect(() => save("kb_banks", banks), [banks]);
@@ -184,12 +188,12 @@ function App() {
     if (!accessToken) return;
     const t = setTimeout(() => {
       setSyncStatus("syncing");
-      driveUpload(accessToken, { marketRate, transactions, rateHistory, banks, customers, tips })
+      driveUpload(accessToken, { marketRate, buySpread, sellSpread, transactions, rateHistory, banks, customers, tips })
         .then(() => setSyncStatus("synced"))
         .catch(() => setSyncStatus("error"));
     }, 1200);
     return () => clearTimeout(t);
-  }, [accessToken, marketRate, transactions, rateHistory, banks, customers, tips]);
+  }, [accessToken, marketRate, buySpread, sellSpread, transactions, rateHistory, banks, customers, tips]);
 
   const restoreFromDrive = async () => {
     if (!accessToken) return;
@@ -198,6 +202,8 @@ function App() {
       const data = await driveDownload(accessToken);
       if (data) {
         if (data.marketRate) setMarketRateRaw(data.marketRate);
+        if (data.buySpread !== undefined) setBuySpread(data.buySpread);
+        if (data.sellSpread !== undefined) setSellSpread(data.sellSpread);
         if (data.transactions) setTransactions(data.transactions);
         if (data.rateHistory) setRateHistory(data.rateHistory);
         if (data.banks) setBanks(data.banks);
@@ -221,12 +227,20 @@ function App() {
   return (
     <div style={{ background: C.paper, minHeight: "100vh", color: C.text }}>
       <div style={{ maxWidth: 460, margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column" }}>
-        <Header marketRate={marketRate} onSettings={() => setTab("settings")} syncStatus={accessToken ? syncStatus : null} />
+        <Header marketRate={marketRate} buyRate={buyRate} sellRate={sellRate} onSettings={() => setTab("settings")} syncStatus={accessToken ? syncStatus : null} />
         <div style={{ flex: 1, paddingBottom: 84 }}>
-          {tab === "convert" && <ConvertTab marketRate={marketRate} setMarketRate={setMarketRate} />}
+          {tab === "convert" && (
+            <ConvertTab
+              marketRate={marketRate} setMarketRate={setMarketRate}
+              buySpread={buySpread} setBuySpread={setBuySpread}
+              sellSpread={sellSpread} setSellSpread={setSellSpread}
+            />
+          )}
           {tab === "new" && (
             <NewTransactionTab
               marketRate={marketRate}
+              buyRate={buyRate}
+              sellRate={sellRate}
               customers={customers}
               onSave={(tx) => { addTransaction(tx); setTab("history"); }}
               onSaveTip={(tip) => { addTip(tip); setTab("history"); }}
@@ -253,7 +267,7 @@ function App() {
   );
 }
 
-function Header({ marketRate, onSettings, syncStatus }) {
+function Header({ marketRate, buyRate, sellRate, onSettings, syncStatus }) {
   const syncLabel = { syncing: "Syncing…", synced: "Synced", error: "Sync error" }[syncStatus] || null;
   return (
     <div style={{ background: C.ink, color: "#fff", padding: "18px 20px 16px" }}>
@@ -274,8 +288,14 @@ function Header({ marketRate, onSettings, syncStatus }) {
           </button>
         </div>
       </div>
-      <div style={{ fontSize: 13, marginTop: 6, color: "#B9C4CE" }}>
-        Today's rate: <span style={{ color: C.goldSoft, fontWeight: 600 }}>{fmt(marketRate, 2)}</span> MMK per 1 THB
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, color: "#B9C4CE" }}>
+          Buy <span style={{ color: C.goldSoft, fontWeight: 700 }}>{fmt(buyRate, 2)}</span>
+        </span>
+        <span style={{ fontSize: 13, color: "#B9C4CE" }}>
+          Sell <span style={{ color: C.goldSoft, fontWeight: 700 }}>{fmt(sellRate, 2)}</span>
+        </span>
+        <span style={{ fontSize: 12, color: "#7C97A8" }}>Ref {fmt(marketRate, 2)} MMK/THB</span>
       </div>
     </div>
   );
@@ -425,18 +445,24 @@ function CandlestickChartSVG({ candles, height = 190, hoverIdx, onHover, color }
 }
 
 // ---------------- Convert Tab ----------------
-function ConvertTab({ marketRate, setMarketRate }) {
+function ConvertTab({ marketRate, setMarketRate, buySpread, setBuySpread, sellSpread, setSellSpread }) {
   const [dir, setDir] = useState("mmk_to_thb");
   const [amount, setAmount] = useState("100000");
   const [rateInput, setRateInput] = useState(String(marketRate));
   const [exMmk, setExMmk] = useState("100000");
   const [exThb, setExThb] = useState("775");
+  const [buySpreadInput, setBuySpreadInput] = useState(String(buySpread));
+  const [sellSpreadInput, setSellSpreadInput] = useState(String(sellSpread));
 
   useEffect(() => setRateInput(String(marketRate)), [marketRate]);
+  useEffect(() => setBuySpreadInput(String(buySpread)), [buySpread]);
+  useEffect(() => setSellSpreadInput(String(sellSpread)), [sellSpread]);
 
   const amt = parseFloat(amount) || 0;
   const rate = parseFloat(rateInput) || 0;
   const result = dir === "mmk_to_thb" ? (rate ? amt / rate : 0) : amt * rate;
+  const buyRate = marketRate + buySpread;
+  const sellRate = marketRate + sellSpread;
 
   const applyExample = () => {
     const mmk = parseFloat(exMmk) || 0, thb = parseFloat(exThb) || 0;
@@ -452,6 +478,34 @@ function ConvertTab({ marketRate, setMarketRate }) {
         <RateBoard value={marketRate} />
         <input type="number" value={rateInput} onChange={(e) => setRateInput(e.target.value)} onBlur={() => rate > 0 && setMarketRate(rate)} style={{ ...inputStyle, textAlign: "center" }} />
         <div style={{ fontSize: 12, color: C.textMute, marginTop: 8, textAlign: "center" }}>This is your reference rate — new transactions compare against it to work out profit.</div>
+      </Card>
+      <Card>
+        <Label>Buy / sell spread</Label>
+        <div style={{ fontSize: 12, color: C.textMute, marginBottom: 12 }}>
+          Your quoted rates are the reference rate plus a spread. Buying THB from a customer defaults to the buy rate; selling THB to a customer defaults to the sell rate.
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <Label>Buy spread (MMK)</Label>
+            <input
+              type="number" value={buySpreadInput}
+              onChange={(e) => setBuySpreadInput(e.target.value)}
+              onBlur={() => setBuySpread(parseFloat(buySpreadInput) || 0)}
+              style={{ ...inputStyle, textAlign: "center" }}
+            />
+            <div style={{ fontSize: 12, color: C.textMute, marginTop: 6, textAlign: "center" }}>Buy rate <strong style={{ color: C.text }}>{fmt(buyRate, 2)}</strong></div>
+          </div>
+          <div style={{ flex: 1 }}>
+            <Label>Sell spread (MMK)</Label>
+            <input
+              type="number" value={sellSpreadInput}
+              onChange={(e) => setSellSpreadInput(e.target.value)}
+              onBlur={() => setSellSpread(parseFloat(sellSpreadInput) || 0)}
+              style={{ ...inputStyle, textAlign: "center" }}
+            />
+            <div style={{ fontSize: 12, color: C.textMute, marginTop: 6, textAlign: "center" }}>Sell rate <strong style={{ color: C.text }}>{fmt(sellRate, 2)}</strong></div>
+          </div>
+        </div>
       </Card>
       <Card>
         <Label>Set rate from an example</Label>
@@ -1054,12 +1108,12 @@ function PriceChartCard() {
 }
 
 // ---------------- New Transaction Tab ----------------
-function NewTransactionTab({ marketRate, customers, onSave, onSaveTip }) {
+function NewTransactionTab({ marketRate, buyRate, sellRate, customers, onSave, onSaveTip }) {
   const [entryType, setEntryType] = useState("exchange"); // exchange | tip
   const [direction, setDirection] = useState("buy");
   const [inputCurrency, setInputCurrency] = useState("THB");
   const [amountInput, setAmountInput] = useState("");
-  const [rateApplied, setRateApplied] = useState(String(marketRate));
+  const [rateApplied, setRateApplied] = useState(String(direction === "buy" ? buyRate : sellRate));
   const [note, setNote] = useState("");
   const [customerId, setCustomerId] = useState("");
   const [checkAmount, setCheckAmount] = useState(false);
@@ -1070,7 +1124,9 @@ function NewTransactionTab({ marketRate, customers, onSave, onSaveTip }) {
   const [tipNote, setTipNote] = useState("");
   const [tipChecked, setTipChecked] = useState(false);
 
-  useEffect(() => setRateApplied(String(marketRate)), [marketRate]);
+  // Default the applied rate to the buy/sell quote for the chosen direction; switching direction
+  // or updating spreads in Settings refreshes the default (still editable per-transaction).
+  useEffect(() => { setRateApplied(String(direction === "buy" ? buyRate : sellRate)); }, [direction, buyRate, sellRate]);
 
   const rate = parseFloat(rateApplied) || 0;
   const amt = parseFloat(amountInput) || 0;
@@ -1154,7 +1210,13 @@ function NewTransactionTab({ marketRate, customers, onSave, onSaveTip }) {
         <Label>Amount currency</Label>
         <ToggleGroup value={inputCurrency} onChange={setInputCurrency} options={[{ value: "THB", label: "THB" }, { value: "MMK", label: "MMK" }]} />
         <div style={{ marginTop: 12 }}><Label>Amount</Label><input type="number" value={amountInput} onChange={(e) => setAmountInput(e.target.value)} style={inputStyle} placeholder="0" /></div>
-        <div style={{ marginTop: 12 }}><Label>Rate you're applying (MMK per 1 THB)</Label><input type="number" value={rateApplied} onChange={(e) => setRateApplied(e.target.value)} style={inputStyle} /></div>
+        <div style={{ marginTop: 12 }}>
+          <Label>Rate you're applying (MMK per 1 THB)</Label>
+          <input type="number" value={rateApplied} onChange={(e) => setRateApplied(e.target.value)} style={inputStyle} />
+          <div style={{ fontSize: 11, color: C.textMute, marginTop: 4 }}>
+            Default {direction === "buy" ? "buy" : "sell"} rate {fmt(direction === "buy" ? buyRate : sellRate, 2)} · reference {fmt(marketRate, 2)}
+          </div>
+        </div>
         <div style={{ marginTop: 12 }}><Label>Note (optional)</Label><input type="text" value={note} onChange={(e) => setNote(e.target.value)} style={{ ...inputStyle, fontFamily: "inherit", fontSize: 15 }} placeholder="Reference" /></div>
       </Card>
       <Card style={{ background: C.ink, color: "#fff", border: "none" }}>
