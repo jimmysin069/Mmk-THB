@@ -155,7 +155,8 @@ function App() {
   const [initialMmk, setInitialMmk] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).initialMmk ?? 0);
   const [transactions, setTransactions] = useState(() => load("kb_transactions", []));
   const [rateHistory, setRateHistory] = useState(() => load("kb_rate_history", []));
-  const [banks, setBanks] = useState(() => load("kb_banks", ["KBZ Bank", "AYA Bank", "CB Bank", "Bangkok Bank", "Kasikorn Bank"]));
+  const [banks, setBanks] = useState(() => load("kb_banks", ["KBZ Bank", "AYA Bank", "CB Bank", "Bangkok Bank", "Kasikorn Bank", "Krung Thai Bank"]));
+  const [bankAccounts, setBankAccounts] = useState(() => load("kb_bank_accounts", []));
   const [customers, setCustomers] = useState(() => load("kb_customers", []));
   const [tips, setTips] = useState(() => load("kb_tips", []));
   const [googleClientId, setGoogleClientId] = useState(() => load("kb_google_client_id", ""));
@@ -166,25 +167,28 @@ function App() {
   const buyRate = marketRate + buySpread;   // rate you pay a customer when buying THB from them
   const sellRate = marketRate + sellSpread; // rate you charge a customer when selling THB to them
 
-  // Running capital balance: starting capital adjusted by every buy/sell transaction and tip received.
-  // Buying THB pays out MMK and receives THB; selling THB does the reverse.
+  // Running capital balance: starting cash-on-hand adjusted by every buy/sell transaction and tip
+  // received, plus whatever you've manually entered as sitting in your bank accounts.
+  const bankThbTotal = useMemo(() => bankAccounts.filter((a) => a.currency === "THB").reduce((s, a) => s + a.amount, 0), [bankAccounts]);
+  const bankMmkTotal = useMemo(() => bankAccounts.filter((a) => a.currency === "MMK").reduce((s, a) => s + a.amount, 0), [bankAccounts]);
   const thbBalance = useMemo(() => {
-    let bal = initialThb;
+    let bal = initialThb + bankThbTotal;
     transactions.forEach((t) => { bal += t.direction === "buy" ? t.amountThb : -t.amountThb; });
     tips.forEach((t) => { if (t.currency === "THB") bal += t.amountThb; });
     return bal;
-  }, [transactions, tips, initialThb]);
+  }, [transactions, tips, initialThb, bankThbTotal]);
   const mmkBalance = useMemo(() => {
-    let bal = initialMmk;
+    let bal = initialMmk + bankMmkTotal;
     transactions.forEach((t) => { bal += t.direction === "buy" ? -t.amountMmk : t.amountMmk; });
     tips.forEach((t) => { if (t.currency === "MMK") bal += t.amountMmk; });
     return bal;
-  }, [transactions, tips, initialMmk]);
+  }, [transactions, tips, initialMmk, bankMmkTotal]);
 
   useEffect(() => save("kb_settings", { marketRate, buySpread, sellSpread, initialThb, initialMmk }), [marketRate, buySpread, sellSpread, initialThb, initialMmk]);
   useEffect(() => save("kb_transactions", transactions), [transactions]);
   useEffect(() => save("kb_rate_history", rateHistory), [rateHistory]);
   useEffect(() => save("kb_banks", banks), [banks]);
+  useEffect(() => save("kb_bank_accounts", bankAccounts), [bankAccounts]);
   useEffect(() => save("kb_customers", customers), [customers]);
   useEffect(() => save("kb_tips", tips), [tips]);
   useEffect(() => save("kb_google_client_id", googleClientId), [googleClientId]);
@@ -205,12 +209,12 @@ function App() {
     if (!accessToken) return;
     const t = setTimeout(() => {
       setSyncStatus("syncing");
-      driveUpload(accessToken, { marketRate, buySpread, sellSpread, initialThb, initialMmk, transactions, rateHistory, banks, customers, tips })
+      driveUpload(accessToken, { marketRate, buySpread, sellSpread, initialThb, initialMmk, transactions, rateHistory, banks, bankAccounts, customers, tips })
         .then(() => setSyncStatus("synced"))
         .catch(() => setSyncStatus("error"));
     }, 1200);
     return () => clearTimeout(t);
-  }, [accessToken, marketRate, buySpread, sellSpread, initialThb, initialMmk, transactions, rateHistory, banks, customers, tips]);
+  }, [accessToken, marketRate, buySpread, sellSpread, initialThb, initialMmk, transactions, rateHistory, banks, bankAccounts, customers, tips]);
 
   const restoreFromDrive = async () => {
     if (!accessToken) return;
@@ -226,6 +230,7 @@ function App() {
         if (data.transactions) setTransactions(data.transactions);
         if (data.rateHistory) setRateHistory(data.rateHistory);
         if (data.banks) setBanks(data.banks);
+        if (data.bankAccounts) setBankAccounts(data.bankAccounts);
         if (data.customers) setCustomers(data.customers);
         if (data.tips) setTips(data.tips);
       }
@@ -242,6 +247,9 @@ function App() {
   const deleteCustomer = (id) => setCustomers((prev) => prev.filter((c) => c.id !== id));
   const addTip = (t) => setTips((prev) => [t, ...prev]);
   const deleteTip = (id) => setTips((prev) => prev.filter((t) => t.id !== id));
+  const addBankAccount = (a) => setBankAccounts((prev) => [a, ...prev]);
+  const updateBankAccount = (id, patch) => setBankAccounts((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  const deleteBankAccount = (id) => setBankAccounts((prev) => prev.filter((a) => a.id !== id));
 
   return (
     <div style={{ background: C.paper, minHeight: "100vh", color: C.text }}>
@@ -276,6 +284,8 @@ function App() {
               thbBalance={thbBalance} mmkBalance={mmkBalance}
               initialThb={initialThb} setInitialThb={setInitialThb}
               initialMmk={initialMmk} setInitialMmk={setInitialMmk}
+              bankAccounts={bankAccounts} banks={banks}
+              onAddBankAccount={addBankAccount} onUpdateBankAccount={updateBankAccount} onDeleteBankAccount={deleteBankAccount}
             />
           )}
           {tab === "settings" && (
@@ -1371,8 +1381,114 @@ function HistoryTab({ transactions, tips, onDelete, onDeleteTip }) {
   );
 }
 
-// ---------------- Reports Tab ----------------
-function ReportsTab({ transactions, tips, rateHistory, currentRate, thbBalance, mmkBalance, initialThb, setInitialThb, initialMmk, setInitialMmk }) {
+// ---------------- Bank accounts (feeds into Capital balance) ----------------
+function emptyBankAccount() {
+  return { bankName: "", currency: "THB", amount: "" };
+}
+
+function BankAccountsCard({ bankAccounts, banks, onAdd, onUpdate, onDelete }) {
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState(emptyBankAccount());
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(null);
+
+  const startAdd = () => { setForm(emptyBankAccount()); setAdding(true); };
+  const saveAdd = () => {
+    const name = form.bankName.trim();
+    if (!name) return;
+    onAdd({ id: String(Date.now()) + Math.random().toString(36).slice(2, 6), bankName: name, currency: form.currency, amount: parseFloat(form.amount) || 0 });
+    setAdding(false);
+  };
+
+  const startEdit = (acc) => { setEditingId(acc.id); setEditForm({ bankName: acc.bankName, currency: acc.currency, amount: String(acc.amount) }); };
+  const saveEdit = () => {
+    const name = editForm.bankName.trim();
+    if (!name) return;
+    onUpdate(editingId, { bankName: name, currency: editForm.currency, amount: parseFloat(editForm.amount) || 0 });
+    setEditingId(null); setEditForm(null);
+  };
+
+  const thbTotal = bankAccounts.filter((a) => a.currency === "THB").reduce((s, a) => s + a.amount, 0);
+  const mmkTotal = bankAccounts.filter((a) => a.currency === "MMK").reduce((s, a) => s + a.amount, 0);
+
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <Label>Bank accounts</Label>
+        {!adding && <button onClick={startAdd} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: C.gold, fontWeight: 700, marginBottom: 6 }}>+ Add account</button>}
+      </div>
+      <div style={{ fontSize: 12, color: C.textMute, marginBottom: 10 }}>Balances here are added into your Capital balance above, on top of your cash on hand.</div>
+
+      {bankAccounts.length === 0 && !adding && <div style={{ fontSize: 13, color: C.textMute, padding: "6px 0" }}>No bank accounts added yet.</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {bankAccounts.map((acc) =>
+          editingId === acc.id ? (
+            <div key={acc.id} style={{ padding: 10, background: C.paper, borderRadius: 10 }}>
+              <input list="kb-bank-names" value={editForm.bankName} onChange={(e) => setEditForm({ ...editForm, bankName: e.target.value })} style={{ ...inputStyle, marginBottom: 8, fontSize: 15 }} placeholder="Bank name" />
+              <div style={{ display: "flex", gap: 8 }}>
+                <select value={editForm.currency} onChange={(e) => setEditForm({ ...editForm, currency: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }}>
+                  <option value="THB">THB</option>
+                  <option value="MMK">MMK</option>
+                </select>
+                <input type="number" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }} placeholder="Amount" />
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button onClick={saveEdit} style={{ flex: 1, padding: "8px 0", background: C.gold, color: "#fff", border: "none", borderRadius: 8, fontWeight: 700, cursor: "pointer" }}>Save</button>
+                <button onClick={() => { setEditingId(null); setEditForm(null); }} style={{ flex: 1, padding: "8px 0", background: "none", border: `1px solid ${C.line}`, borderRadius: 8, cursor: "pointer" }}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <div key={acc.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{acc.bankName}</div>
+                <div style={{ fontSize: 12, color: C.textMute }}>{acc.currency}</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700 }}>
+                  {acc.currency === "THB" ? `฿ ${fmt(acc.amount, 2)}` : `${fmt(acc.amount, 0)} MMK`}
+                </div>
+                <button onClick={() => startEdit(acc)} style={{ background: "none", border: "none", cursor: "pointer", color: C.textMute, fontSize: 13 }}>Edit</button>
+                <button onClick={() => onDelete(acc.id)} style={{ background: "none", border: "none", cursor: "pointer", color: C.red, fontSize: 16, lineHeight: 1 }}>×</button>
+              </div>
+            </div>
+          )
+        )}
+      </div>
+
+      {adding && (
+        <div style={{ marginTop: 10, padding: 10, background: C.paper, borderRadius: 10 }}>
+          <input list="kb-bank-names" value={form.bankName} onChange={(e) => setForm({ ...form, bankName: e.target.value })} style={{ ...inputStyle, marginBottom: 8, fontSize: 15 }} placeholder="Bank name (e.g. Kasikorn Bank)" autoFocus />
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }}>
+              <option value="THB">THB</option>
+              <option value="MMK">MMK</option>
+            </select>
+            <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }} placeholder="Amount" />
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button onClick={saveAdd} style={{ flex: 1, padding: "8px 0", background: C.gold, color: "#fff", border: "none", borderRadius: 8, fontWeight: 700, cursor: "pointer" }}>Add</button>
+            <button onClick={() => setAdding(false)} style={{ flex: 1, padding: "8px 0", background: "none", border: `1px solid ${C.line}`, borderRadius: 8, cursor: "pointer" }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <datalist id="kb-bank-names">
+        {banks.map((b) => <option key={b} value={b} />)}
+      </datalist>
+
+      {bankAccounts.length > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}`, fontSize: 13 }}>
+          <span style={{ color: C.textMute }}>Total in banks</span>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700 }}>฿ {fmt(thbTotal, 2)} · {fmt(mmkTotal, 0)} MMK</span>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+
+function ReportsTab({ transactions, tips, rateHistory, currentRate, thbBalance, mmkBalance, initialThb, setInitialThb, initialMmk, setInitialMmk, bankAccounts, banks, onAddBankAccount, onUpdateBankAccount, onDeleteBankAccount }) {
   const today = todayKey(Date.now());
   const thisMonth = monthKey(Date.now());
   const allTips = tips || [];
@@ -1468,7 +1584,7 @@ function ReportsTab({ transactions, tips, rateHistory, currentRate, thbBalance, 
         {editingCapital && (
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.15)" }}>
             <div style={{ fontSize: 12, color: "#B9C4CE", marginBottom: 10 }}>
-              Set your capital on hand right now — this becomes the baseline, and every transaction and tip adjusts it from here.
+              Set your cash on hand right now (separate from the bank accounts below) — this becomes the baseline, and every transaction and tip adjusts it from here.
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               <div style={{ flex: 1 }}>
@@ -1484,6 +1600,10 @@ function ReportsTab({ transactions, tips, rateHistory, currentRate, thbBalance, 
           </div>
         )}
       </Card>
+      <BankAccountsCard
+        bankAccounts={bankAccounts} banks={banks}
+        onAdd={onAddBankAccount} onUpdate={onUpdateBankAccount} onDelete={onDeleteBankAccount}
+      />
       <div style={{ display: "flex", gap: 10 }}>
         <StatCard label="Today" value={todayProfit} />
         <StatCard label="This month" value={monthProfit} />
