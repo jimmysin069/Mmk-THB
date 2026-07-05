@@ -148,9 +148,11 @@ const ICONS = {
 
 function App() {
   const [tab, setTab] = useState("convert");
-  const [marketRate, setMarketRateRaw] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5 }).marketRate);
-  const [buySpread, setBuySpread] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5 }).buySpread ?? 0);
-  const [sellSpread, setSellSpread] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5 }).sellSpread ?? 5);
+  const [marketRate, setMarketRateRaw] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).marketRate);
+  const [buySpread, setBuySpread] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).buySpread ?? 0);
+  const [sellSpread, setSellSpread] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).sellSpread ?? 5);
+  const [initialThb, setInitialThb] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).initialThb ?? 0);
+  const [initialMmk, setInitialMmk] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).initialMmk ?? 0);
   const [transactions, setTransactions] = useState(() => load("kb_transactions", []));
   const [rateHistory, setRateHistory] = useState(() => load("kb_rate_history", []));
   const [banks, setBanks] = useState(() => load("kb_banks", ["KBZ Bank", "AYA Bank", "CB Bank", "Bangkok Bank", "Kasikorn Bank"]));
@@ -164,7 +166,22 @@ function App() {
   const buyRate = marketRate + buySpread;   // rate you pay a customer when buying THB from them
   const sellRate = marketRate + sellSpread; // rate you charge a customer when selling THB to them
 
-  useEffect(() => save("kb_settings", { marketRate, buySpread, sellSpread }), [marketRate, buySpread, sellSpread]);
+  // Running capital balance: starting capital adjusted by every buy/sell transaction and tip received.
+  // Buying THB pays out MMK and receives THB; selling THB does the reverse.
+  const thbBalance = useMemo(() => {
+    let bal = initialThb;
+    transactions.forEach((t) => { bal += t.direction === "buy" ? t.amountThb : -t.amountThb; });
+    tips.forEach((t) => { if (t.currency === "THB") bal += t.amountThb; });
+    return bal;
+  }, [transactions, tips, initialThb]);
+  const mmkBalance = useMemo(() => {
+    let bal = initialMmk;
+    transactions.forEach((t) => { bal += t.direction === "buy" ? -t.amountMmk : t.amountMmk; });
+    tips.forEach((t) => { if (t.currency === "MMK") bal += t.amountMmk; });
+    return bal;
+  }, [transactions, tips, initialMmk]);
+
+  useEffect(() => save("kb_settings", { marketRate, buySpread, sellSpread, initialThb, initialMmk }), [marketRate, buySpread, sellSpread, initialThb, initialMmk]);
   useEffect(() => save("kb_transactions", transactions), [transactions]);
   useEffect(() => save("kb_rate_history", rateHistory), [rateHistory]);
   useEffect(() => save("kb_banks", banks), [banks]);
@@ -188,12 +205,12 @@ function App() {
     if (!accessToken) return;
     const t = setTimeout(() => {
       setSyncStatus("syncing");
-      driveUpload(accessToken, { marketRate, buySpread, sellSpread, transactions, rateHistory, banks, customers, tips })
+      driveUpload(accessToken, { marketRate, buySpread, sellSpread, initialThb, initialMmk, transactions, rateHistory, banks, customers, tips })
         .then(() => setSyncStatus("synced"))
         .catch(() => setSyncStatus("error"));
     }, 1200);
     return () => clearTimeout(t);
-  }, [accessToken, marketRate, buySpread, sellSpread, transactions, rateHistory, banks, customers, tips]);
+  }, [accessToken, marketRate, buySpread, sellSpread, initialThb, initialMmk, transactions, rateHistory, banks, customers, tips]);
 
   const restoreFromDrive = async () => {
     if (!accessToken) return;
@@ -204,6 +221,8 @@ function App() {
         if (data.marketRate) setMarketRateRaw(data.marketRate);
         if (data.buySpread !== undefined) setBuySpread(data.buySpread);
         if (data.sellSpread !== undefined) setSellSpread(data.sellSpread);
+        if (data.initialThb !== undefined) setInitialThb(data.initialThb);
+        if (data.initialMmk !== undefined) setInitialMmk(data.initialMmk);
         if (data.transactions) setTransactions(data.transactions);
         if (data.rateHistory) setRateHistory(data.rateHistory);
         if (data.banks) setBanks(data.banks);
@@ -250,7 +269,14 @@ function App() {
           {tab === "customers" && (
             <CustomersTab customers={customers} banks={banks} onAdd={addCustomer} onUpdate={updateCustomer} onDelete={deleteCustomer} />
           )}
-          {tab === "reports" && <ReportsTab transactions={transactions} tips={tips} rateHistory={rateHistory} currentRate={marketRate} />}
+          {tab === "reports" && (
+            <ReportsTab
+              transactions={transactions} tips={tips} rateHistory={rateHistory} currentRate={marketRate}
+              thbBalance={thbBalance} mmkBalance={mmkBalance}
+              initialThb={initialThb} setInitialThb={setInitialThb}
+              initialMmk={initialMmk} setInitialMmk={setInitialMmk}
+            />
+          )}
           {tab === "settings" && (
             <SettingsTab
               banks={banks} setBanks={setBanks}
@@ -1331,7 +1357,7 @@ function HistoryTab({ transactions, tips, onDelete, onDeleteTip }) {
 }
 
 // ---------------- Reports Tab ----------------
-function ReportsTab({ transactions, tips, rateHistory, currentRate }) {
+function ReportsTab({ transactions, tips, rateHistory, currentRate, thbBalance, mmkBalance, initialThb, setInitialThb, initialMmk, setInitialMmk }) {
   const today = todayKey(Date.now());
   const thisMonth = monthKey(Date.now());
   const allTips = tips || [];
@@ -1344,6 +1370,18 @@ function ReportsTab({ transactions, tips, rateHistory, currentRate }) {
   const todayProfit = profitToday + tipsToday;
   const monthProfit = profitMonth + tipsMonth;
   const grandTotal = allProfit + allTipsTotal;
+
+  const [editingCapital, setEditingCapital] = useState(false);
+  const [thbInput, setThbInput] = useState(String(initialThb));
+  const [mmkInput, setMmkInput] = useState(String(initialMmk));
+  useEffect(() => { setThbInput(String(initialThb)); setMmkInput(String(initialMmk)); }, [initialThb, initialMmk]);
+
+  const saveCapital = () => {
+    setInitialThb(parseFloat(thbInput) || 0);
+    setInitialMmk(parseFloat(mmkInput) || 0);
+    setEditingCapital(false);
+  };
+  const totalValueMmk = thbBalance * currentRate + mmkBalance;
 
   const rateTrend = useMemo(() => {
     const pointMap = {};
@@ -1392,6 +1430,45 @@ function ReportsTab({ transactions, tips, rateHistory, currentRate }) {
 
   return (
     <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <Card style={{ background: C.ink, color: "#fff", border: "none" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <span style={{ fontSize: 12, color: "#B9C4CE", textTransform: "uppercase", letterSpacing: 0.4, fontWeight: 600 }}>Capital balance</span>
+          <button onClick={() => setEditingCapital((v) => !v)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: C.goldSoft, fontWeight: 700 }}>
+            {editingCapital ? "Cancel" : "Set starting capital"}
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1, textAlign: "center", padding: "14px 8px", background: "rgba(255,255,255,0.06)", borderRadius: 10 }}>
+            <div style={{ fontSize: 11, color: "#7C97A8", textTransform: "uppercase", letterSpacing: 0.4 }}>THB</div>
+            <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 20, marginTop: 4 }}>฿ {fmt(thbBalance, 2)}</div>
+          </div>
+          <div style={{ flex: 1, textAlign: "center", padding: "14px 8px", background: "rgba(255,255,255,0.06)", borderRadius: 10 }}>
+            <div style={{ fontSize: 11, color: "#7C97A8", textTransform: "uppercase", letterSpacing: 0.4 }}>MMK</div>
+            <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 20, marginTop: 4 }}>{fmt(mmkBalance, 0)}</div>
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: "#7C97A8", marginTop: 10, textAlign: "center" }}>
+          ≈ {fmt(totalValueMmk, 0)} MMK total, valued at today's reference rate ({fmt(currentRate, 2)})
+        </div>
+        {editingCapital && (
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.15)" }}>
+            <div style={{ fontSize: 12, color: "#B9C4CE", marginBottom: 10 }}>
+              Set your capital on hand right now — this becomes the baseline, and every transaction and tip adjusts it from here.
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: "#7C97A8", marginBottom: 4 }}>THB on hand</div>
+                <input type="number" value={thbInput} onChange={(e) => setThbInput(e.target.value)} style={{ ...inputStyle, textAlign: "center" }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: "#7C97A8", marginBottom: 4 }}>MMK on hand</div>
+                <input type="number" value={mmkInput} onChange={(e) => setMmkInput(e.target.value)} style={{ ...inputStyle, textAlign: "center" }} />
+              </div>
+            </div>
+            <button onClick={saveCapital} style={{ marginTop: 10, width: "100%", padding: "10px 0", background: C.gold, color: "#fff", border: "none", borderRadius: 10, fontWeight: 700, cursor: "pointer" }}>Save capital</button>
+          </div>
+        )}
+      </Card>
       <div style={{ display: "flex", gap: 10 }}>
         <StatCard label="Today" value={todayProfit} />
         <StatCard label="This month" value={monthProfit} />
