@@ -253,6 +253,7 @@ function App() {
               marketRate={marketRate} setMarketRate={setMarketRate}
               buySpread={buySpread} setBuySpread={setBuySpread}
               sellSpread={sellSpread} setSellSpread={setSellSpread}
+              thbBalance={thbBalance} mmkBalance={mmkBalance}
             />
           )}
           {tab === "new" && (
@@ -471,7 +472,7 @@ function CandlestickChartSVG({ candles, height = 190, hoverIdx, onHover, color }
 }
 
 // ---------------- Convert Tab ----------------
-function ConvertTab({ marketRate, setMarketRate, buySpread, setBuySpread, sellSpread, setSellSpread }) {
+function ConvertTab({ marketRate, setMarketRate, buySpread, setBuySpread, sellSpread, setSellSpread, thbBalance, mmkBalance }) {
   const [dir, setDir] = useState("mmk_to_thb");
   const [amount, setAmount] = useState("100000");
   const [rateInput, setRateInput] = useState(String(marketRate));
@@ -497,6 +498,20 @@ function ConvertTab({ marketRate, setMarketRate, buySpread, setBuySpread, sellSp
 
   return (
     <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <Card style={{ background: C.ink, color: "#fff", border: "none" }}>
+        <div style={{ fontSize: 12, color: "#B9C4CE", textTransform: "uppercase", letterSpacing: 0.4, fontWeight: 600, marginBottom: 10 }}>Capital balance</div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1, textAlign: "center", padding: "12px 8px", background: "rgba(255,255,255,0.06)", borderRadius: 10 }}>
+            <div style={{ fontSize: 11, color: "#7C97A8", textTransform: "uppercase", letterSpacing: 0.4 }}>THB</div>
+            <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 18, marginTop: 4 }}>฿ {fmt(thbBalance, 2)}</div>
+          </div>
+          <div style={{ flex: 1, textAlign: "center", padding: "12px 8px", background: "rgba(255,255,255,0.06)", borderRadius: 10 }}>
+            <div style={{ fontSize: 11, color: "#7C97A8", textTransform: "uppercase", letterSpacing: 0.4 }}>MMK</div>
+            <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 18, marginTop: 4 }}>{fmt(mmkBalance, 0)}</div>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: "#7C97A8", marginTop: 8, textAlign: "center" }}>See the Reports tab to set your starting capital.</div>
+      </Card>
       <MarketRatesCard setMarketRate={setMarketRate} />
       <PriceChartCard />
       <Card>
