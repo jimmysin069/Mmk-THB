@@ -36,6 +36,24 @@ const fmt = (n, d = 0) => (isNaN(n) ? 0 : n).toLocaleString("en-US", { minimumFr
 const todayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
 const monthKey = (ts) => new Date(ts).toISOString().slice(0, 7);
 
+// Every exchange transaction has an outgoing leg (what you pay out) and an incoming leg (what you
+// receive). Buying THB from a customer pays out MMK and receives THB; selling THB is the reverse.
+const txOutgoingCurrency = (t) => (t.direction === "buy" ? "MMK" : "THB");
+const txIncomingCurrency = (t) => (t.direction === "buy" ? "THB" : "MMK");
+const txOutgoingAmount = (t) => (t.direction === "buy" ? t.amountMmk : t.amountThb);
+const txIncomingAmount = (t) => (t.direction === "buy" ? t.amountThb : t.amountMmk);
+
+// A bank account's running balance = its opening balance plus every transaction that named it as
+// the paying-out account (subtract) or the receiving account (add).
+const computeBankAccountBalance = (account, transactions) => {
+  let bal = account.openingBalance || 0;
+  transactions.forEach((t) => {
+    if (t.fromAccountId === account.id) bal -= txOutgoingAmount(t);
+    if (t.toAccountId === account.id) bal += txIncomingAmount(t);
+  });
+  return bal;
+};
+
 function load(key, fallback) {
   try {
     const v = localStorage.getItem(key);
@@ -156,7 +174,13 @@ function App() {
   const [transactions, setTransactions] = useState(() => load("kb_transactions", []));
   const [rateHistory, setRateHistory] = useState(() => load("kb_rate_history", []));
   const [banks, setBanks] = useState(() => load("kb_banks", ["KBZ Bank", "AYA Bank", "CB Bank", "Bangkok Bank", "Kasikorn Bank", "Krung Thai Bank"]));
-  const [bankAccounts, setBankAccounts] = useState(() => load("kb_bank_accounts", []));
+  const [bankAccounts, setBankAccounts] = useState(() =>
+    load("kb_bank_accounts", []).map((a) => ({
+      accountName: "", accountNumber: "",
+      ...a,
+      openingBalance: a.openingBalance !== undefined ? a.openingBalance : (a.amount || 0),
+    }))
+  );
   const [customers, setCustomers] = useState(() => load("kb_customers", []));
   const [tips, setTips] = useState(() => load("kb_tips", []));
   const [googleClientId, setGoogleClientId] = useState(() => load("kb_google_client_id", ""));
@@ -167,22 +191,34 @@ function App() {
   const buyRate = marketRate + buySpread;   // rate you pay a customer when buying THB from them
   const sellRate = marketRate + sellSpread; // rate you charge a customer when selling THB to them
 
-  // Running capital balance: starting cash-on-hand adjusted by every buy/sell transaction and tip
-  // received, plus whatever you've manually entered as sitting in your bank accounts.
-  const bankThbTotal = useMemo(() => bankAccounts.filter((a) => a.currency === "THB").reduce((s, a) => s + a.amount, 0), [bankAccounts]);
-  const bankMmkTotal = useMemo(() => bankAccounts.filter((a) => a.currency === "MMK").reduce((s, a) => s + a.amount, 0), [bankAccounts]);
+  // Running capital balance: starting cash-on-hand adjusted by every buy/sell leg that wasn't routed
+  // through a bank account, plus every bank account's own running ledger (opening balance adjusted
+  // by every transaction that named it as the paying-out or receiving account).
+  const bankBalances = useMemo(() => {
+    const map = {};
+    bankAccounts.forEach((a) => { map[a.id] = computeBankAccountBalance(a, transactions); });
+    return map;
+  }, [bankAccounts, transactions]);
   const thbBalance = useMemo(() => {
-    let bal = initialThb + bankThbTotal;
-    transactions.forEach((t) => { bal += t.direction === "buy" ? t.amountThb : -t.amountThb; });
-    tips.forEach((t) => { if (t.currency === "THB") bal += t.amountThb; });
-    return bal;
-  }, [transactions, tips, initialThb, bankThbTotal]);
+    let cash = initialThb;
+    transactions.forEach((t) => {
+      if (txOutgoingCurrency(t) === "THB" && !t.fromAccountId) cash -= txOutgoingAmount(t);
+      if (txIncomingCurrency(t) === "THB" && !t.toAccountId) cash += txIncomingAmount(t);
+    });
+    tips.forEach((t) => { if (t.currency === "THB") cash += t.amountThb; });
+    const banksThb = bankAccounts.filter((a) => a.currency === "THB").reduce((s, a) => s + (bankBalances[a.id] || 0), 0);
+    return cash + banksThb;
+  }, [transactions, tips, initialThb, bankAccounts, bankBalances]);
   const mmkBalance = useMemo(() => {
-    let bal = initialMmk + bankMmkTotal;
-    transactions.forEach((t) => { bal += t.direction === "buy" ? -t.amountMmk : t.amountMmk; });
-    tips.forEach((t) => { if (t.currency === "MMK") bal += t.amountMmk; });
-    return bal;
-  }, [transactions, tips, initialMmk, bankMmkTotal]);
+    let cash = initialMmk;
+    transactions.forEach((t) => {
+      if (txOutgoingCurrency(t) === "MMK" && !t.fromAccountId) cash -= txOutgoingAmount(t);
+      if (txIncomingCurrency(t) === "MMK" && !t.toAccountId) cash += txIncomingAmount(t);
+    });
+    tips.forEach((t) => { if (t.currency === "MMK") cash += t.amountMmk; });
+    const banksMmk = bankAccounts.filter((a) => a.currency === "MMK").reduce((s, a) => s + (bankBalances[a.id] || 0), 0);
+    return cash + banksMmk;
+  }, [transactions, tips, initialMmk, bankAccounts, bankBalances]);
 
   useEffect(() => save("kb_settings", { marketRate, buySpread, sellSpread, initialThb, initialMmk }), [marketRate, buySpread, sellSpread, initialThb, initialMmk]);
   useEffect(() => save("kb_transactions", transactions), [transactions]);
@@ -270,11 +306,13 @@ function App() {
               buyRate={buyRate}
               sellRate={sellRate}
               customers={customers}
+              bankAccounts={bankAccounts}
+              bankBalances={bankBalances}
               onSave={(tx) => { addTransaction(tx); setTab("history"); }}
               onSaveTip={(tip) => { addTip(tip); setTab("history"); }}
             />
           )}
-          {tab === "history" && <HistoryTab transactions={transactions} tips={tips} onDelete={deleteTransaction} onDeleteTip={deleteTip} />}
+          {tab === "history" && <HistoryTab transactions={transactions} tips={tips} bankAccounts={bankAccounts} onDelete={deleteTransaction} onDeleteTip={deleteTip} />}
           {tab === "customers" && (
             <CustomersTab customers={customers} banks={banks} onAdd={addCustomer} onUpdate={updateCustomer} onDelete={deleteCustomer} />
           )}
@@ -284,7 +322,7 @@ function App() {
               thbBalance={thbBalance} mmkBalance={mmkBalance}
               initialThb={initialThb} setInitialThb={setInitialThb}
               initialMmk={initialMmk} setInitialMmk={setInitialMmk}
-              bankAccounts={bankAccounts} banks={banks}
+              bankAccounts={bankAccounts} banks={banks} bankBalances={bankBalances}
               onAddBankAccount={addBankAccount} onUpdateBankAccount={updateBankAccount} onDeleteBankAccount={deleteBankAccount}
             />
           )}
@@ -1159,7 +1197,7 @@ function PriceChartCard() {
 }
 
 // ---------------- New Transaction Tab ----------------
-function NewTransactionTab({ marketRate, buyRate, sellRate, customers, onSave, onSaveTip }) {
+function NewTransactionTab({ marketRate, buyRate, sellRate, customers, bankAccounts, bankBalances, onSave, onSaveTip }) {
   const [entryType, setEntryType] = useState("exchange"); // exchange | tip
   const [direction, setDirection] = useState("buy");
   const [inputCurrency, setInputCurrency] = useState("THB");
@@ -1167,6 +1205,8 @@ function NewTransactionTab({ marketRate, buyRate, sellRate, customers, onSave, o
   const [rateApplied, setRateApplied] = useState(String(direction === "buy" ? buyRate : sellRate));
   const [note, setNote] = useState("");
   const [customerId, setCustomerId] = useState("");
+  const [fromAccountId, setFromAccountId] = useState("");
+  const [toAccountId, setToAccountId] = useState("");
   const [checkAmount, setCheckAmount] = useState(false);
   const [checkReceipt, setCheckReceipt] = useState(false);
 
@@ -1178,6 +1218,16 @@ function NewTransactionTab({ marketRate, buyRate, sellRate, customers, onSave, o
   // Default the applied rate to the buy/sell quote for the chosen direction; switching direction
   // or updating spreads in Settings refreshes the default (still editable per-transaction).
   useEffect(() => { setRateApplied(String(direction === "buy" ? buyRate : sellRate)); }, [direction, buyRate, sellRate]);
+  // Outgoing/incoming currencies flip with direction, so a previously chosen account may no longer
+  // match — reset both pickers back to "cash" whenever direction changes.
+  useEffect(() => { setFromAccountId(""); setToAccountId(""); }, [direction]);
+
+  const outgoingCurrency = direction === "buy" ? "MMK" : "THB";
+  const incomingCurrency = direction === "buy" ? "THB" : "MMK";
+  const fromAccounts = (bankAccounts || []).filter((a) => a.currency === outgoingCurrency);
+  const toAccounts = (bankAccounts || []).filter((a) => a.currency === incomingCurrency);
+  const accountLabel = (a) => `${a.bankName}${a.accountName ? " — " + a.accountName : ""}`;
+  const accountBalance = (a) => (bankBalances && bankBalances[a.id] !== undefined ? bankBalances[a.id] : a.openingBalance || 0);
 
   const rate = parseFloat(rateApplied) || 0;
   const amt = parseFloat(amountInput) || 0;
@@ -1186,6 +1236,9 @@ function NewTransactionTab({ marketRate, buyRate, sellRate, customers, onSave, o
   const profit = direction === "buy" ? amountThb * (marketRate - rate) : amountThb * (rate - marketRate);
   const customer = customers.find((c) => c.id === customerId);
   const canSave = amt > 0 && rate > 0 && checkAmount && checkReceipt;
+  const outgoingAmount = outgoingCurrency === "THB" ? amountThb : amountMmk;
+  const fromAccount = fromAccountId ? fromAccounts.find((a) => a.id === fromAccountId) : null;
+  const insufficientFunds = fromAccount && accountBalance(fromAccount) - outgoingAmount < 0;
 
   const save = () => {
     if (!canSave) return;
@@ -1193,8 +1246,9 @@ function NewTransactionTab({ marketRate, buyRate, sellRate, customers, onSave, o
       id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), ts: Date.now(), direction,
       amountThb, amountMmk, rateApplied: rate, marketRate, profit, note: note.trim(),
       customerId: customerId || null, customerName: customer ? customer.name : null,
+      fromAccountId: fromAccountId || null, toAccountId: toAccountId || null,
     });
-    setAmountInput(""); setNote(""); setCheckAmount(false); setCheckReceipt(false);
+    setAmountInput(""); setNote(""); setCheckAmount(false); setCheckReceipt(false); setFromAccountId(""); setToAccountId("");
   };
 
   const tipAmt = parseFloat(tipAmount) || 0;
@@ -1270,6 +1324,29 @@ function NewTransactionTab({ marketRate, buyRate, sellRate, customers, onSave, o
         </div>
         <div style={{ marginTop: 12 }}><Label>Note (optional)</Label><input type="text" value={note} onChange={(e) => setNote(e.target.value)} style={{ ...inputStyle, fontFamily: "inherit", fontSize: 15 }} placeholder="Reference" /></div>
       </Card>
+      <Card>
+        <Label>Pay {outgoingCurrency} from</Label>
+        <select value={fromAccountId} onChange={(e) => setFromAccountId(e.target.value)} style={{ ...inputStyle, fontFamily: "inherit", fontSize: 15 }}>
+          <option value="">Cash on hand</option>
+          {fromAccounts.map((a) => (
+            <option key={a.id} value={a.id}>{accountLabel(a)} ({fmt(accountBalance(a), a.currency === "THB" ? 2 : 0)})</option>
+          ))}
+        </select>
+        {insufficientFunds && (
+          <div style={{ fontSize: 12, color: C.red, marginTop: 6 }}>
+            Heads up — this account only has {fmt(accountBalance(fromAccount), fromAccount.currency === "THB" ? 2 : 0)} {fromAccount.currency}, less than the {fmt(outgoingAmount, outgoingCurrency === "THB" ? 2 : 0)} this needs.
+          </div>
+        )}
+        <div style={{ marginTop: 12 }}>
+          <Label>Receive {incomingCurrency} into</Label>
+          <select value={toAccountId} onChange={(e) => setToAccountId(e.target.value)} style={{ ...inputStyle, fontFamily: "inherit", fontSize: 15 }}>
+            <option value="">Cash on hand</option>
+            {toAccounts.map((a) => (
+              <option key={a.id} value={a.id}>{accountLabel(a)} ({fmt(accountBalance(a), a.currency === "THB" ? 2 : 0)})</option>
+            ))}
+          </select>
+        </div>
+      </Card>
       <Card style={{ background: C.ink, color: "#fff", border: "none" }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 8, color: "#B9C4CE" }}><span>THB amount</span><span style={{ fontFamily: "ui-monospace, monospace" }}>฿ {fmt(amountThb, 2)}</span></div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 8, color: "#B9C4CE" }}><span>MMK amount</span><span style={{ fontFamily: "ui-monospace, monospace" }}>{fmt(amountMmk, 0)} K</span></div>
@@ -1311,7 +1388,11 @@ function Checkbox({ checked, onChange }) {
 }
 
 // ---------------- History Tab ----------------
-function HistoryTab({ transactions, tips, onDelete, onDeleteTip }) {
+function HistoryTab({ transactions, tips, bankAccounts, onDelete, onDeleteTip }) {
+  const accountName = (id) => {
+    const a = (bankAccounts || []).find((x) => x.id === id);
+    return a ? `${a.bankName}${a.accountName ? " — " + a.accountName : ""}` : null;
+  };
   const groups = useMemo(() => {
     const g = {};
     transactions.forEach((t) => { const k = todayKey(t.ts); g[k] = g[k] || []; g[k].push({ ...t, kind: "exchange" }); });
@@ -1364,6 +1445,11 @@ function HistoryTab({ transactions, tips, onDelete, onDeleteTip }) {
                       <div style={{ fontSize: 13, fontWeight: 700, color: t.direction === "buy" ? C.ink : C.inkSoft }}>{t.direction === "buy" ? "Bought THB" : "Sold THB"}</div>
                       <div style={{ fontSize: 12, color: C.textMute, marginTop: 2 }}>฿ {fmt(t.amountThb, 2)} @ {fmt(t.rateApplied, 2)} · {new Date(t.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
                       {t.customerName && <div style={{ fontSize: 12, color: C.ink, marginTop: 2, fontWeight: 600 }}>{t.customerName}</div>}
+                      {(t.fromAccountId || t.toAccountId) && (
+                        <div style={{ fontSize: 11, color: C.textMute, marginTop: 2 }}>
+                          {accountName(t.fromAccountId) || "Cash"} → {accountName(t.toAccountId) || "Cash"}
+                        </div>
+                      )}
                       {t.note && <div style={{ fontSize: 12, color: C.textMute, marginTop: 2, fontStyle: "italic" }}>{t.note}</div>}
                     </div>
                     <div style={{ textAlign: "right" }}>
@@ -1383,10 +1469,10 @@ function HistoryTab({ transactions, tips, onDelete, onDeleteTip }) {
 
 // ---------------- Bank accounts (feeds into Capital balance) ----------------
 function emptyBankAccount() {
-  return { bankName: "", currency: "THB", amount: "" };
+  return { bankName: "", accountName: "", accountNumber: "", currency: "THB", openingBalance: "" };
 }
 
-function BankAccountsCard({ bankAccounts, banks, onAdd, onUpdate, onDelete }) {
+function BankAccountsCard({ bankAccounts, banks, bankBalances, onAdd, onUpdate, onDelete }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState(emptyBankAccount());
   const [editingId, setEditingId] = useState(null);
@@ -1396,20 +1482,31 @@ function BankAccountsCard({ bankAccounts, banks, onAdd, onUpdate, onDelete }) {
   const saveAdd = () => {
     const name = form.bankName.trim();
     if (!name) return;
-    onAdd({ id: String(Date.now()) + Math.random().toString(36).slice(2, 6), bankName: name, currency: form.currency, amount: parseFloat(form.amount) || 0 });
+    onAdd({
+      id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
+      bankName: name, accountName: form.accountName.trim(), accountNumber: form.accountNumber.trim(),
+      currency: form.currency, openingBalance: parseFloat(form.openingBalance) || 0,
+    });
     setAdding(false);
   };
 
-  const startEdit = (acc) => { setEditingId(acc.id); setEditForm({ bankName: acc.bankName, currency: acc.currency, amount: String(acc.amount) }); };
+  const startEdit = (acc) => {
+    setEditingId(acc.id);
+    setEditForm({ bankName: acc.bankName, accountName: acc.accountName || "", accountNumber: acc.accountNumber || "", currency: acc.currency, openingBalance: String(acc.openingBalance || 0) });
+  };
   const saveEdit = () => {
     const name = editForm.bankName.trim();
     if (!name) return;
-    onUpdate(editingId, { bankName: name, currency: editForm.currency, amount: parseFloat(editForm.amount) || 0 });
+    onUpdate(editingId, {
+      bankName: name, accountName: editForm.accountName.trim(), accountNumber: editForm.accountNumber.trim(),
+      currency: editForm.currency, openingBalance: parseFloat(editForm.openingBalance) || 0,
+    });
     setEditingId(null); setEditForm(null);
   };
 
-  const thbTotal = bankAccounts.filter((a) => a.currency === "THB").reduce((s, a) => s + a.amount, 0);
-  const mmkTotal = bankAccounts.filter((a) => a.currency === "MMK").reduce((s, a) => s + a.amount, 0);
+  const balanceOf = (acc) => (bankBalances && bankBalances[acc.id] !== undefined ? bankBalances[acc.id] : acc.openingBalance || 0);
+  const thbTotal = bankAccounts.filter((a) => a.currency === "THB").reduce((s, a) => s + balanceOf(a), 0);
+  const mmkTotal = bankAccounts.filter((a) => a.currency === "MMK").reduce((s, a) => s + balanceOf(a), 0);
 
   return (
     <Card>
@@ -1417,7 +1514,9 @@ function BankAccountsCard({ bankAccounts, banks, onAdd, onUpdate, onDelete }) {
         <Label>Bank accounts</Label>
         {!adding && <button onClick={startAdd} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: C.gold, fontWeight: 700, marginBottom: 6 }}>+ Add account</button>}
       </div>
-      <div style={{ fontSize: 12, color: C.textMute, marginBottom: 10 }}>Balances here are added into your Capital balance above, on top of your cash on hand.</div>
+      <div style={{ fontSize: 12, color: C.textMute, marginBottom: 10 }}>
+        Balances here feed into your Capital balance above. Pick these accounts on the New transaction screen and their balances update automatically from then on.
+      </div>
 
       {bankAccounts.length === 0 && !adding && <div style={{ fontSize: 13, color: C.textMute, padding: "6px 0" }}>No bank accounts added yet.</div>}
 
@@ -1426,27 +1525,32 @@ function BankAccountsCard({ bankAccounts, banks, onAdd, onUpdate, onDelete }) {
           editingId === acc.id ? (
             <div key={acc.id} style={{ padding: 10, background: C.paper, borderRadius: 10 }}>
               <input list="kb-bank-names" value={editForm.bankName} onChange={(e) => setEditForm({ ...editForm, bankName: e.target.value })} style={{ ...inputStyle, marginBottom: 8, fontSize: 15 }} placeholder="Bank name" />
+              <input type="text" value={editForm.accountName} onChange={(e) => setEditForm({ ...editForm, accountName: e.target.value })} style={{ ...inputStyle, marginBottom: 8, fontSize: 15, fontFamily: "inherit" }} placeholder="Account holder name" />
+              <input type="text" value={editForm.accountNumber} onChange={(e) => setEditForm({ ...editForm, accountNumber: e.target.value })} style={{ ...inputStyle, marginBottom: 8, fontSize: 15, fontFamily: "inherit" }} placeholder="Account number" />
               <div style={{ display: "flex", gap: 8 }}>
                 <select value={editForm.currency} onChange={(e) => setEditForm({ ...editForm, currency: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }}>
                   <option value="THB">THB</option>
                   <option value="MMK">MMK</option>
                 </select>
-                <input type="number" value={editForm.amount} onChange={(e) => setEditForm({ ...editForm, amount: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }} placeholder="Amount" />
+                <input type="number" value={editForm.openingBalance} onChange={(e) => setEditForm({ ...editForm, openingBalance: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }} placeholder="Opening balance" />
               </div>
+              <div style={{ fontSize: 11, color: C.textMute, marginTop: 6 }}>Opening balance is the starting point — any transactions already routed through this account are added on top automatically.</div>
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <button onClick={saveEdit} style={{ flex: 1, padding: "8px 0", background: C.gold, color: "#fff", border: "none", borderRadius: 8, fontWeight: 700, cursor: "pointer" }}>Save</button>
                 <button onClick={() => { setEditingId(null); setEditForm(null); }} style={{ flex: 1, padding: "8px 0", background: "none", border: `1px solid ${C.line}`, borderRadius: 8, cursor: "pointer" }}>Cancel</button>
               </div>
             </div>
           ) : (
-            <div key={acc.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
+            <div key={acc.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600 }}>{acc.bankName}</div>
-                <div style={{ fontSize: 12, color: C.textMute }}>{acc.currency}</div>
+                {acc.accountName && <div style={{ fontSize: 12, color: C.textMute, marginTop: 1 }}>{acc.accountName}</div>}
+                {acc.accountNumber && <div style={{ fontSize: 12, color: C.textMute, marginTop: 1 }}>#{acc.accountNumber}</div>}
+                <div style={{ fontSize: 11, color: C.textMute, marginTop: 2 }}>{acc.currency}</div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700 }}>
-                  {acc.currency === "THB" ? `฿ ${fmt(acc.amount, 2)}` : `${fmt(acc.amount, 0)} MMK`}
+                  {acc.currency === "THB" ? `฿ ${fmt(balanceOf(acc), 2)}` : `${fmt(balanceOf(acc), 0)} MMK`}
                 </div>
                 <button onClick={() => startEdit(acc)} style={{ background: "none", border: "none", cursor: "pointer", color: C.textMute, fontSize: 13 }}>Edit</button>
                 <button onClick={() => onDelete(acc.id)} style={{ background: "none", border: "none", cursor: "pointer", color: C.red, fontSize: 16, lineHeight: 1 }}>×</button>
@@ -1459,12 +1563,14 @@ function BankAccountsCard({ bankAccounts, banks, onAdd, onUpdate, onDelete }) {
       {adding && (
         <div style={{ marginTop: 10, padding: 10, background: C.paper, borderRadius: 10 }}>
           <input list="kb-bank-names" value={form.bankName} onChange={(e) => setForm({ ...form, bankName: e.target.value })} style={{ ...inputStyle, marginBottom: 8, fontSize: 15 }} placeholder="Bank name (e.g. Kasikorn Bank)" autoFocus />
+          <input type="text" value={form.accountName} onChange={(e) => setForm({ ...form, accountName: e.target.value })} style={{ ...inputStyle, marginBottom: 8, fontSize: 15, fontFamily: "inherit" }} placeholder="Account holder name" />
+          <input type="text" value={form.accountNumber} onChange={(e) => setForm({ ...form, accountNumber: e.target.value })} style={{ ...inputStyle, marginBottom: 8, fontSize: 15, fontFamily: "inherit" }} placeholder="Account number" />
           <div style={{ display: "flex", gap: 8 }}>
             <select value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }}>
               <option value="THB">THB</option>
               <option value="MMK">MMK</option>
             </select>
-            <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }} placeholder="Amount" />
+            <input type="number" value={form.openingBalance} onChange={(e) => setForm({ ...form, openingBalance: e.target.value })} style={{ ...inputStyle, flex: 1, fontSize: 15 }} placeholder="Opening balance" />
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             <button onClick={saveAdd} style={{ flex: 1, padding: "8px 0", background: C.gold, color: "#fff", border: "none", borderRadius: 8, fontWeight: 700, cursor: "pointer" }}>Add</button>
@@ -1488,7 +1594,7 @@ function BankAccountsCard({ bankAccounts, banks, onAdd, onUpdate, onDelete }) {
 }
 
 
-function ReportsTab({ transactions, tips, rateHistory, currentRate, thbBalance, mmkBalance, initialThb, setInitialThb, initialMmk, setInitialMmk, bankAccounts, banks, onAddBankAccount, onUpdateBankAccount, onDeleteBankAccount }) {
+function ReportsTab({ transactions, tips, rateHistory, currentRate, thbBalance, mmkBalance, initialThb, setInitialThb, initialMmk, setInitialMmk, bankAccounts, banks, bankBalances, onAddBankAccount, onUpdateBankAccount, onDeleteBankAccount }) {
   const today = todayKey(Date.now());
   const thisMonth = monthKey(Date.now());
   const allTips = tips || [];
@@ -1601,7 +1707,7 @@ function ReportsTab({ transactions, tips, rateHistory, currentRate, thbBalance, 
         )}
       </Card>
       <BankAccountsCard
-        bankAccounts={bankAccounts} banks={banks}
+        bankAccounts={bankAccounts} banks={banks} bankBalances={bankBalances}
         onAdd={onAddBankAccount} onUpdate={onUpdateBankAccount} onDelete={onDeleteBankAccount}
       />
       <div style={{ display: "flex", gap: 10 }}>
