@@ -5,13 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>MMK · THB Exchange Tracker</title>
 <link rel="manifest" href="manifest.json" />
-<meta name="theme-color" content="#0F2A3D" />
+<meta name="theme-color" id="themeColorMeta" content="#0B1117" />
 <link rel="apple-touch-icon" href="icon-192.png" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <style>
   * { box-sizing: border-box; }
-  body { margin: 0; background: #F7F5F0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  body { margin: 0; background: #0B1117; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
   input[type=number]::-webkit-inner-spin-button { opacity: 1; }
 </style>
 </head>
@@ -26,11 +26,33 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo } = React;
 
-const C = {
-  ink: "#0F2A3D", inkSoft: "#1B3B52", gold: "#C9A227", goldSoft: "#E6C866",
-  paper: "#F7F5F0", card: "#FFFFFF", line: "#E4E0D6", text: "#20262E",
-  textMute: "#6B7280", green: "#1F7A4D", red: "#B23A2E",
+const THEMES = {
+  light: {
+    ink: "#0F2A3D", inkSoft: "#1B3B52", gold: "#C9A227", goldSoft: "#E6C866",
+    paper: "#F7F5F0", card: "#FFFFFF", line: "#E4E0D6", text: "#20262E",
+    textMute: "#6B7280", green: "#1F7A4D", red: "#B23A2E",
+    inputBg: "#FCFBF8", trackBg: "#EFECE3", navBg: "#FFFFFF", isDark: false,
+  },
+  midnight: {
+    ink: "#13232F", inkSoft: "#1C3040", gold: "#D9B54A", goldSoft: "#F0D98C",
+    paper: "#0B1117", card: "#161F29", line: "#293544", text: "#E7EAEE",
+    textMute: "#8B97A5", green: "#3DBE7A", red: "#E0564A",
+    inputBg: "#101822", trackBg: "#1C2733", navBg: "#111922", isDark: true,
+  },
+  slate: {
+    ink: "#1E2A38", inkSoft: "#2A3B4D", gold: "#E0B84E", goldSoft: "#F2D888",
+    paper: "#161C24", card: "#20272F", line: "#333D48", text: "#EDEFF2",
+    textMute: "#96A1AC", green: "#45C285", red: "#E1665A",
+    inputBg: "#1B222A", trackBg: "#2A323B", navBg: "#1A2028", isDark: true,
+  },
 };
+// C is mutated in place (not reassigned) so every plain style object that reads C.xxx at render
+// time picks up the active theme automatically, without threading theme/props through every
+// component in the tree.
+const C = { ...THEMES.light };
+function applyTheme(name) {
+  Object.assign(C, THEMES[name] || THEMES.light);
+}
 
 const fmt = (n, d = 0) => (isNaN(n) ? 0 : n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 const todayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
@@ -162,10 +184,20 @@ const ICONS = {
   cloud: "M18 10h-1.26A8 8 0 109 20h9a5 5 0 000-10z",
   check: "M20 6L9 17l-5-5",
   x: "M18 6L6 18M6 6l12 12",
+  sun: "M12 17a5 5 0 100-10 5 5 0 000 10zM12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42",
+  moon: "M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z",
 };
 
 function App() {
   const [tab, setTab] = useState("convert");
+  const [theme, setTheme] = useState(() => load("kb_theme", "midnight"));
+  applyTheme(theme); // mutate C synchronously so this render (and everything under it) sees the new palette
+  useEffect(() => {
+    save("kb_theme", theme);
+    document.body.style.background = C.paper;
+    const meta = document.getElementById("themeColorMeta");
+    if (meta) meta.setAttribute("content", C.ink);
+  }, [theme]);
   const [marketRate, setMarketRateRaw] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).marketRate);
   const [buySpread, setBuySpread] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).buySpread ?? 0);
   const [sellSpread, setSellSpread] = useState(() => load("kb_settings", { marketRate: 130, buySpread: 0, sellSpread: 5, initialThb: 0, initialMmk: 0 }).sellSpread ?? 5);
@@ -290,7 +322,7 @@ function App() {
   return (
     <div style={{ background: C.paper, minHeight: "100vh", color: C.text }}>
       <div style={{ maxWidth: 460, margin: "0 auto", minHeight: "100vh", display: "flex", flexDirection: "column" }}>
-        <Header marketRate={marketRate} buyRate={buyRate} sellRate={sellRate} onSettings={() => setTab("settings")} syncStatus={accessToken ? syncStatus : null} />
+        <Header marketRate={marketRate} buyRate={buyRate} sellRate={sellRate} onSettings={() => setTab("settings")} syncStatus={accessToken ? syncStatus : null} theme={theme} setTheme={setTheme} />
         <div style={{ flex: 1, paddingBottom: 84 }}>
           {tab === "convert" && (
             <ConvertTab
@@ -333,6 +365,7 @@ function App() {
               accessToken={accessToken} setAccessToken={setAccessToken}
               syncStatus={syncStatus} setSyncStatus={setSyncStatus}
               onRestore={restoreFromDrive}
+              theme={theme} setTheme={setTheme}
             />
           )}
         </div>
@@ -342,8 +375,9 @@ function App() {
   );
 }
 
-function Header({ marketRate, buyRate, sellRate, onSettings, syncStatus }) {
+function Header({ marketRate, buyRate, sellRate, onSettings, syncStatus, theme, setTheme }) {
   const syncLabel = { syncing: "Syncing…", synced: "Synced", error: "Sync error" }[syncStatus] || null;
+  const isDark = theme !== "light";
   return (
     <div style={{ background: C.ink, color: "#fff", padding: "18px 20px 16px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -357,6 +391,15 @@ function Header({ marketRate, buyRate, sellRate, onSettings, syncStatus }) {
               <Icon path={ICONS.cloud} size={13} color={syncStatus === "error" ? "#F0A79E" : C.goldSoft} />
               {syncLabel}
             </span>
+          )}
+          {setTheme && (
+            <button
+              onClick={() => setTheme(isDark ? "light" : "midnight")}
+              title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+              style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}
+            >
+              <Icon path={isDark ? ICONS.sun : ICONS.moon} size={18} color="#B9C4CE" />
+            </button>
           )}
           <button onClick={onSettings} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
             <Icon path={ICONS.gear} size={19} color="#B9C4CE" />
@@ -385,7 +428,7 @@ function BottomNav({ tab, setTab }) {
     { id: "reports", label: "Reports", icon: ICONS.chart },
   ];
   return (
-    <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 460, background: "#fff", borderTop: `1px solid ${C.line}`, display: "flex", padding: "6px 4px calc(6px + env(safe-area-inset-bottom))" }}>
+    <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 460, background: C.navBg, borderTop: `1px solid ${C.line}`, display: "flex", padding: "6px 4px calc(6px + env(safe-area-inset-bottom))" }}>
       {items.map(({ id, label, icon }) => {
         const active = tab === id;
         return (
@@ -405,11 +448,20 @@ function Card({ children, style }) {
 function Label({ children }) {
   return <div style={{ fontSize: 12, fontWeight: 600, color: C.textMute, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>{children}</div>;
 }
-const inputStyle = { width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${C.line}`, fontSize: 17, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", background: "#FCFBF8", color: C.text, boxSizing: "border-box" };
+// Getters (not plain values) so this object stays correct after a theme switch — it's created once
+// at module load, but style={inputStyle} / {...inputStyle} both re-read these on every render.
+const inputStyle = {
+  width: "100%", padding: "12px 14px", borderRadius: 10,
+  get border() { return `1px solid ${C.line}`; },
+  fontSize: 17, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  get background() { return C.inputBg; },
+  get color() { return C.text; },
+  boxSizing: "border-box",
+};
 
 function ToggleGroup({ options, value, onChange }) {
   return (
-    <div style={{ display: "flex", background: "#EFECE3", borderRadius: 10, padding: 3 }}>
+    <div style={{ display: "flex", background: C.trackBg, borderRadius: 10, padding: 3 }}>
       {options.map((opt) => (
         <button key={opt.value} onClick={() => onChange(opt.value)} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", cursor: "pointer", background: value === opt.value ? C.ink : "transparent", color: value === opt.value ? "#fff" : C.textMute, fontWeight: 600, fontSize: 13 }}>
           {opt.label}
@@ -621,20 +673,58 @@ function ConvertTab({ marketRate, setMarketRate, buySpread, setBuySpread, sellSp
   );
 }
 
+// Pulls the latest closed 4H candle for every pair (direct or derived) via the same Twelve Data
+// infrastructure the price chart uses, and reshapes it to match fetchMarketData()'s daily shape.
+async function fetchMarketData4h(apiKey) {
+  const pairs = await Promise.all(
+    CHART_INSTRUMENTS.map((i) => fetchTdCandles(i.key, "4h", 2, apiKey).then((candles) => [i.key, candles[candles.length - 1]]))
+  );
+  const byKey = Object.fromEntries(pairs);
+  const usdThb = byKey.usd_thb && byKey.usd_thb.close;
+  const usdMmk = byKey.usd_mmk && byKey.usd_mmk.close;
+  const thbMmk = byKey.thb_mmk && byKey.thb_mmk.close;
+  const goldThbOz = byKey.gold_thb && byKey.gold_thb.close;
+  if (!usdThb || !usdMmk || !thbMmk || !goldThbOz) throw new Error("Incomplete 4H data");
+  return {
+    date: byKey.usd_thb.date, fetchedAt: Date.now(),
+    usdThb, usdMmk, thbMmk, goldThbOz, goldThbGram: goldThbOz / OUNCE_IN_GRAMS,
+    tf: "4h",
+  };
+}
+
 function MarketRatesCard({ setMarketRate }) {
   const [data, setData] = useState(() => load("kb_market_data", null));
   const [status, setStatus] = useState("idle"); // idle | loading | error
   const [multiplier, setMultiplier] = useState(() => load("kb_parallel_multiplier", 2));
+  const [apiKey, setApiKey] = useState(() => load("kb_twelvedata_key", ""));
+  const [keyDraft, setKeyDraft] = useState("");
+
+  useEffect(() => save("kb_twelvedata_key", apiKey), [apiKey]);
 
   const refresh = () => {
     setStatus("loading");
-    fetchMarketData()
-      .then((d) => { setData(d); save("kb_market_data", d); setStatus("idle"); })
-      .catch(() => setStatus("error"));
+    const fallbackToDaily = () =>
+      fetchMarketData()
+        .then((d) => { setData({ ...d, tf: "1d" }); save("kb_market_data", { ...d, tf: "1d" }); setStatus("idle"); })
+        .catch(() => setStatus("error"));
+    if (apiKey) {
+      fetchMarketData4h(apiKey)
+        .then((d) => { setData(d); save("kb_market_data", d); setStatus("idle"); })
+        .catch(fallbackToDaily);
+    } else {
+      fallbackToDaily();
+    }
   };
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); }, [apiKey]);
   useEffect(() => save("kb_parallel_multiplier", multiplier), [multiplier]);
+  // Refresh on the same 3-min cadence as the price chart's live poll, comfortably inside Twelve
+  // Data's free-tier rate limits.
+  useEffect(() => {
+    if (!apiKey) return;
+    const id = setInterval(refresh, 180000);
+    return () => clearInterval(id);
+  }, [apiKey]);
 
   const Row = ({ label, value, sub, action }) => (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: `1px solid ${C.line}` }}>
@@ -677,11 +767,36 @@ function MarketRatesCard({ setMarketRate }) {
   return (
     <Card>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-        <Label>Live market reference</Label>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Label>Live market reference</Label>
+          {data && (
+            <span style={{
+              fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 5, marginBottom: 6,
+              background: data.tf === "4h" ? "rgba(61,190,122,0.15)" : C.trackBg,
+              color: data.tf === "4h" ? C.green : C.textMute,
+            }}>
+              {data.tf === "4h" ? "4H LIVE" : "DAILY"}
+            </span>
+          )}
+        </div>
         <button onClick={refresh} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: C.gold, fontWeight: 700 }}>
           {status === "loading" ? "Refreshing…" : "Refresh"}
         </button>
       </div>
+      {!apiKey && (
+        <div style={{ padding: "8px 10px", background: C.paper, borderRadius: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 12, color: C.textMute, marginBottom: 8 }}>
+            Add a free Twelve Data API key to switch every pair here to live 4H closes (currently showing daily rates).
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type="text" value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)}
+              style={{ ...inputStyle, fontSize: 13 }} placeholder="Twelve Data API key"
+            />
+            <button onClick={() => keyDraft.trim() && setApiKey(keyDraft.trim())} style={{ padding: "0 14px", borderRadius: 8, border: "none", background: C.gold, color: "#fff", fontWeight: 700, cursor: "pointer" }}>Save</button>
+          </div>
+        </div>
+      )}
       {!data && status !== "error" && <div style={{ fontSize: 13, color: C.textMute, padding: "8px 0" }}>Loading rates…</div>}
       {!data && status === "error" && <div style={{ fontSize: 13, color: C.red, padding: "8px 0" }}>Couldn't load rates — check your connection and tap Refresh.</div>}
       {data && (
@@ -715,7 +830,9 @@ function MarketRatesCard({ setMarketRate }) {
           <Row label="Gold / THB (per oz)" value={fmt(data.goldThbOz, 0)} />
           <Row label="Gold / THB (per gram)" value={fmt(data.goldThbGram, 0)} />
           <div style={{ fontSize: 11, color: C.textMute, marginTop: 8 }}>
-            Source: exchange-api (fawazahmed0), daily update · data date {data.date}
+            {data.tf === "4h"
+              ? `Source: Twelve Data · latest closed 4H candle · re-checks every 3 min · ${data.date}`
+              : `Source: exchange-api (fawazahmed0), daily update · data date ${data.date}`}
             {status === "error" && " · refresh failed, showing last saved rates"}
           </div>
         </>
@@ -1389,7 +1506,7 @@ function Checkbox({ checked, onChange }) {
   return (
     <span
       onClick={() => onChange(!checked)}
-      style={{ width: 22, height: 22, borderRadius: 6, border: `2px solid ${checked ? C.gold : C.line}`, background: checked ? C.gold : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+      style={{ width: 22, height: 22, borderRadius: 6, border: `2px solid ${checked ? C.gold : C.line}`, background: checked ? C.gold : C.card, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
     >
       {checked && <Icon path={ICONS.check} size={14} color="#fff" />}
     </span>
@@ -1847,7 +1964,7 @@ function CustomerForm({ initial, banks, onCancel, onSubmit }) {
         <input type="text" value={c.social} onChange={set("social")} style={{ ...inputStyle, fontFamily: "inherit", fontSize: 15 }} placeholder="Facebook / Telegram / Line link" />
       </Card>
       <div style={{ display: "flex", gap: 10 }}>
-        <button onClick={onCancel} style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: `1px solid ${C.line}`, background: "#fff", color: C.textMute, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+        <button onClick={onCancel} style={{ flex: 1, padding: "12px 0", borderRadius: 12, border: `1px solid ${C.line}`, background: C.card, color: C.textMute, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
         <button onClick={() => canSave && onSubmit(c)} disabled={!canSave} style={{ flex: 2, padding: "12px 0", borderRadius: 12, border: "none", background: canSave ? C.gold : "#D8D3C4", color: "#fff", fontWeight: 700, cursor: canSave ? "pointer" : "not-allowed" }}>Save customer</button>
       </div>
     </div>
@@ -1855,7 +1972,7 @@ function CustomerForm({ initial, banks, onCancel, onSubmit }) {
 }
 
 // ---------------- Settings Tab ----------------
-function SettingsTab({ banks, setBanks, googleClientId, setGoogleClientId, accessToken, setAccessToken, syncStatus, setSyncStatus, onRestore }) {
+function SettingsTab({ banks, setBanks, googleClientId, setGoogleClientId, accessToken, setAccessToken, syncStatus, setSyncStatus, onRestore, theme, setTheme }) {
   const [newBank, setNewBank] = useState("");
   const [clientIdInput, setClientIdInput] = useState(googleClientId);
 
@@ -1894,8 +2011,35 @@ function SettingsTab({ banks, setBanks, googleClientId, setGoogleClientId, acces
 
   const disconnect = () => setAccessToken(null);
 
+  const THEME_OPTIONS = [
+    { key: "light", label: "Light" },
+    { key: "midnight", label: "Midnight" },
+    { key: "slate", label: "Slate" },
+  ];
+
   return (
     <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      {setTheme && (
+        <Card>
+          <Label>Appearance</Label>
+          <div style={{ display: "flex", gap: 8 }}>
+            {THEME_OPTIONS.map((o) => (
+              <button
+                key={o.key}
+                onClick={() => setTheme(o.key)}
+                style={{
+                  flex: 1, padding: "10px 0", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 13,
+                  border: `2px solid ${theme === o.key ? C.gold : C.line}`,
+                  background: theme === o.key ? C.gold : C.card,
+                  color: theme === o.key ? "#fff" : C.text,
+                }}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
       <Card>
         <Label>Google account backup</Label>
         <div style={{ fontSize: 13, color: C.textMute, marginBottom: 12 }}>
@@ -1916,8 +2060,8 @@ function SettingsTab({ banks, setBanks, googleClientId, setGoogleClientId, acces
               <Icon path={ICONS.check} size={16} color={C.green} /> Connected — {syncStatus === "syncing" ? "syncing…" : "up to date"}
             </div>
             <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={onRestore} style={{ flex: 1, padding: "12px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: "#fff", color: C.ink, fontWeight: 700, cursor: "pointer" }}>Restore from Drive</button>
-              <button onClick={disconnect} style={{ flex: 1, padding: "12px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: "#fff", color: C.red, fontWeight: 700, cursor: "pointer" }}>Disconnect</button>
+              <button onClick={onRestore} style={{ flex: 1, padding: "12px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: C.card, color: C.ink, fontWeight: 700, cursor: "pointer" }}>Restore from Drive</button>
+              <button onClick={disconnect} style={{ flex: 1, padding: "12px 0", borderRadius: 10, border: `1px solid ${C.line}`, background: C.card, color: C.red, fontWeight: 700, cursor: "pointer" }}>Disconnect</button>
             </div>
           </>
         )}
